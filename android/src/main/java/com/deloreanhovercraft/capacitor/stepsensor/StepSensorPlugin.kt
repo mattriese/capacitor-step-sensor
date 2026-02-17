@@ -81,7 +81,7 @@ class StepSensorPlugin : Plugin() {
         StepCounterService.setNotificationConfig(context, notificationTitle, notificationText)
 
         // Check permissions before starting
-        if (!hasRequiredPermissions()) {
+        if (!hasAllRequiredPermissions()) {
             // Save the call so we can resolve it after permission result
             bridge.saveCall(call)
             requestAllPermissions(call, "permissionCallback")
@@ -165,7 +165,7 @@ class StepSensorPlugin : Plugin() {
 
     // --- Permission helpers ---
 
-    private fun hasRequiredPermissions(): Boolean {
+    private fun hasAllRequiredPermissions(): Boolean {
         if (!hasActivityRecognitionPermission()) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) return false
         return true
