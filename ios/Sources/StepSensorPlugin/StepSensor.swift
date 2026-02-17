@@ -1,8 +1,5 @@
 import Foundation
 
 @objc public class StepSensor: NSObject {
-    @objc public func echo(_ value: String) -> String {
-        print(value)
-        return value
-    }
+    // No-op on iOS — all step tracking is handled natively by HealthKit
 }

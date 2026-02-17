@@ -1,2 +1,40 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Foreground service permissions -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Health Connect read permission for foreground service type "health" on API 34+ -->
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+
+    <!-- AlarmManager scheduling (SCHEDULE_EXACT_ALARM for API 31+, requires user grant) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- Re-register alarms after device reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application>
+        <!-- Foreground step counter service -->
+        <service
+            android:name=".StepCounterService"
+            android:foregroundServiceType="health"
+            android:exported="false" />
+
+        <!-- Alarm receiver: starts/stops the service at scheduled times -->
+        <receiver
+            android:name=".StepTrackingAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Boot receiver: re-registers alarms after device reboot -->
+        <receiver
+            android:name=".BootCompletedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+
 </manifest>
