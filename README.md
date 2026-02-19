@@ -38,9 +38,51 @@ The plugin handles runtime permission requests automatically when you call `star
 import { StepSensor } from 'capacitor-step-sensor';
 ```
 
-### 2. Schedule tracking windows
+### 2. Recommended integration
 
-Call this when your app knows the time windows during which it needs step tracking (e.g., commitment windows). The plugin registers AlarmManager alarms that start and stop the foreground service automatically -- even if the app is closed or the phone is in Doze mode.
+The plugin captures steps through two complementary mechanisms:
+
+| Mechanism | When it runs | What it captures | Limitation |
+| --- | --- | --- | --- |
+| **Foreground service** (`scheduleStepTracking`) | During commitment windows | Real-time phone sensor + HC data as it arrives | Misses watch data that syncs after the service stops |
+| **On-demand backfill** (`backfillFromHealthConnect`) | Whenever your app calls it | Health Connect data for any past time range | No phone sensor data (HC only) |
+
+**You need both.** The foreground service gives you high-resolution, real-time step data during each commitment window. But smartwatch data often syncs to Health Connect 15+ minutes after the walk ends -- after the service has already stopped. The backfill reads that late-arriving data from Health Connect and merges it into your existing step buckets.
+
+You can pass your full list of commitment windows to both calls. Each handles the right subset automatically:
+- `scheduleStepTracking` **skips past windows** and schedules alarms for future ones
+- `backfillFromHealthConnect` **processes past windows** by querying Health Connect for each time range
+
+On every app open or resume, call both, then read the latest data:
+
+```typescript
+import { App } from '@capacitor/app';
+import { StepSensor } from 'capacitor-step-sensor';
+
+App.addListener('appStateChange', async ({ isActive }) => {
+  if (!isActive) return;
+
+  const windows = getCommitmentWindows(); // your app logic
+
+  // Re-register alarms for future windows (defense-in-depth against force-stop)
+  await StepSensor.scheduleStepTracking({ windows });
+
+  // Backfill past windows with late-arriving watch data from Health Connect
+  await StepSensor.backfillFromHealthConnect({ windows });
+
+  // Read the latest step data
+  const result = await StepSensor.getTrackedSteps({ since: getLastSyncTime() });
+  syncToServer(result.steps);
+});
+```
+
+Also call `scheduleStepTracking` whenever commitments are created or modified -- not just on app open.
+
+The sections below explain each method in more detail.
+
+### 3. Schedule tracking windows
+
+`scheduleStepTracking` registers AlarmManager exact alarms that start and stop the foreground service automatically -- even if the app is closed or the phone is in Doze mode.
 
 ```typescript
 await StepSensor.scheduleStepTracking({
@@ -57,15 +99,49 @@ await StepSensor.scheduleStepTracking({
 });
 ```
 
-Call this:
-- When commitments are created or modified
-- On every app open (defense-in-depth -- re-registers alarms in case they were cleared by a force-stop)
-
 Each call replaces all previously scheduled windows. Overlapping windows are automatically merged. Past windows are skipped. If a window's `startAt` is in the past but `endAt` is in the future, the service starts immediately.
 
-### 3. Start/stop tracking manually (optional)
+### 4. Backfill from Health Connect
 
-You can also start and stop the service directly without scheduling:
+`backfillFromHealthConnect` queries Health Connect using `readRecords()` (explicit time-range queries) for each window, then runs the subtract-and-fill algorithm against your existing SQLite data. This is idempotent -- safe to call repeatedly, since the MAX upsert in SQLite prevents double-counting.
+
+```typescript
+const { backedUp } = await StepSensor.backfillFromHealthConnect({
+  windows: [
+    {
+      startAt: '2025-03-15T09:00:00.000Z',
+      endAt: '2025-03-15T10:00:00.000Z',
+    },
+  ],
+});
+// backedUp === false if Health Connect is unavailable or permissions not granted
+```
+
+Unlike the foreground service (which uses `getChanges` with a token), backfill has no token to manage -- it works even if the service never started, or if the app was force-stopped and tokens were lost.
+
+On iOS/web, this resolves with `{ backedUp: false }` (no-op).
+
+### 5. Read accumulated step data
+
+Both the foreground service and backfill write to the same SQLite database. Read step data back anytime -- even while the service is running:
+
+```typescript
+// Get all tracked steps
+const result = await StepSensor.getTrackedSteps();
+
+for (const bucket of result.steps) {
+  console.log(`${bucket.bucketStart} - ${bucket.bucketEnd}: ${bucket.steps} steps`);
+}
+
+// Get steps since a specific time
+const recent = await StepSensor.getTrackedSteps({
+  since: '2025-03-15T09:00:00.000Z',
+});
+```
+
+### 6. Start/stop tracking manually (optional)
+
+You can also start and stop the foreground service directly without scheduling:
 
 ```typescript
 // Start immediately (requests permissions if needed)
@@ -83,55 +159,9 @@ await StepSensor.stopStepTracking();
 
 If no custom notification text is provided, the notification defaults to "Tracking steps for \<Your App Name\>" using your app's display name from `AndroidManifest.xml`.
 
-### 4. Read accumulated step data
+### 7. Clear data
 
-The service writes step counts to a local SQLite database in 30-second buckets. Read them back anytime -- even while the service is running:
-
-```typescript
-// Get all tracked steps
-const result = await StepSensor.getTrackedSteps();
-
-for (const bucket of result.steps) {
-  console.log(`${bucket.bucketStart} - ${bucket.bucketEnd}: ${bucket.steps} steps`);
-}
-
-// Get steps since a specific time
-const recent = await StepSensor.getTrackedSteps({
-  since: '2025-03-15T09:00:00.000Z',
-});
-```
-
-### 5. Backfill from Health Connect (recommended)
-
-Watch data may not sync to Health Connect until 15+ minutes after a walk ends. Steps recorded after the foreground service stops would be missed without backfill. Call `backfillFromHealthConnect()` on every app resume to capture late-arriving data:
-
-```typescript
-// On every app resume, backfill past commitment windows
-const { backedUp } = await StepSensor.backfillFromHealthConnect({
-  windows: [
-    {
-      startAt: '2025-03-15T09:00:00.000Z',
-      endAt: '2025-03-15T10:00:00.000Z',
-    },
-    {
-      startAt: '2025-03-15T14:00:00.000Z',
-      endAt: '2025-03-15T15:30:00.000Z',
-    },
-  ],
-});
-
-if (backedUp) {
-  console.log('Health Connect backfill complete');
-}
-```
-
-This is safe to call multiple times -- the MAX upsert in SQLite prevents double-counting. It uses `readRecords()` (explicit time-range queries) rather than `getChanges()`, so there's no token to manage and it works even if the service never started.
-
-On iOS/web, this resolves with `{ backedUp: false }` (no-op).
-
-### 6. Clear data
-
-Use `clearData()` to delete step data from the local database:
+Use `clearData()` to delete step data from the local database. This replaces the old `deleteAfterRead` option on `getTrackedSteps`, which was removed because deleting rows before late watch syncs arrive would break subtract-and-fill.
 
 ```typescript
 // Delete all data
@@ -145,6 +175,8 @@ await StepSensor.clearData({
 
 ## How It Works
 
+### Real-time tracking (foreground service)
+
 The Android foreground service uses two data sources:
 
 | Source | What it reads | Granularity | Limitation |
@@ -155,6 +187,12 @@ The Android foreground service uses two data sources:
 Every 30 seconds, the service writes phone sensor steps to the current bucket. When Health Connect records arrive (e.g., from a watch sync), the service uses a **subtract-and-fill** algorithm: it subtracts the phone steps already recorded in the covered buckets, then distributes the surplus into only the zero-step buckets (gaps the phone didn't capture). This avoids double-counting while preserving the phone's per-bucket temporal accuracy.
 
 **Commitment boundary handling:** HC records that overlap the start or end of a scheduled tracking window are fully credited (all steps count), but only written to buckets within the window. Each zero-step bucket is capped at 90 steps/30s (180 steps/min) to filter physically impossible values.
+
+### Late-sync backfill
+
+The foreground service stops at each window's `endAt`, but watch data may not sync to Health Connect for 15+ minutes after the walk ends. `backfillFromHealthConnect` fills this gap by querying Health Connect directly with `readRecords(timeRangeFilter)` for each past commitment window. It runs the same subtract-and-fill algorithm against existing database data, so phone sensor steps recorded during the service are preserved and only gaps are filled.
+
+Because `readRecords` queries by time range (not a changes token), backfill is idempotent and stateless -- it works correctly even after app force-stops, crashes, or if the service never ran at all.
 
 See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm design.
 
