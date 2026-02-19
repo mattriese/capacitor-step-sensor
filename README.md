@@ -301,9 +301,9 @@ foreground service stopped (watch data may sync 15+ minutes late).
 
 On iOS/web, resolves with { backedUp: false } (no-op).
 
-| Param         | Type                                                          |
-| ------------- | ------------------------------------------------------------- |
-| **`options`** | <code><a href="#backfilloptions">BackfillOptions</a></code>   |
+| Param         | Type                                                        |
+| ------------- | ----------------------------------------------------------- |
+| **`options`** | <code><a href="#backfilloptions">BackfillOptions</a></code> |
 
 **Returns:** <code>Promise&lt;<a href="#backfillresult">BackfillResult</a>&gt;</code>
 
@@ -320,9 +320,9 @@ Delete step data from the local database.
 If `before` is provided, deletes all buckets with bucketStart before that time.
 If omitted, deletes all data.
 
-| Param         | Type                                                              |
-| ------------- | ----------------------------------------------------------------- |
-| **`options`** | <code><a href="#cleardataoptions">ClearDataOptions</a></code>     |
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code><a href="#cleardataoptions">ClearDataOptions</a></code> |
 
 --------------------
 
@@ -362,24 +362,12 @@ If omitted, deletes all data.
 
 #### StepBucket
 
-| Prop              | Type                | Description                                                              |
-| ----------------- | ------------------- | ------------------------------------------------------------------------ |
-| **`bucketStart`** | <code>string</code> | ISO 8601 timestamp for the start of this 30-second bucket.               |
-| **`bucketEnd`**   | <code>string</code> | ISO 8601 timestamp for the end of this 30-second bucket.                 |
-| **`steps`**       | <code>number</code> | Number of steps recorded in this bucket.                                 |
-| **`hcMetadata`**  | <code>string</code> | Raw Health Connect records JSON, if HC data contributed to this bucket.   |
-
-
-#### HcRecord
-
-The `hcMetadata` field, when present, is a JSON string containing an array of HC record objects:
-
-| Prop              | Type                | Description                                      |
-| ----------------- | ------------------- | ------------------------------------------------ |
-| **`startTime`**   | <code>string</code> | ISO 8601 timestamp for the start of the record.  |
-| **`endTime`**     | <code>string</code> | ISO 8601 timestamp for the end of the record.    |
-| **`count`**       | <code>number</code> | Number of steps in this HC record.               |
-| **`dataOrigin`**  | <code>string</code> | Package name of the app that wrote the record.   |
+| Prop              | Type                | Description                                                             |
+| ----------------- | ------------------- | ----------------------------------------------------------------------- |
+| **`bucketStart`** | <code>string</code> | ISO 8601 timestamp for the start of this 30-second bucket.              |
+| **`bucketEnd`**   | <code>string</code> | ISO 8601 timestamp for the end of this 30-second bucket.                |
+| **`steps`**       | <code>number</code> | Number of steps recorded in this bucket.                                |
+| **`hcMetadata`**  | <code>string</code> | Raw Health Connect records JSON, if HC data contributed to this bucket. |
 
 
 #### GetTrackedStepsOptions
@@ -389,6 +377,13 @@ The `hcMetadata` field, when present, is a JSON string containing an array of HC
 | **`since`** | <code>string</code> | ISO 8601 timestamp. Only return buckets starting at or after this time. |
 
 
+#### BackfillResult
+
+| Prop           | Type                 | Description                                                       |
+| -------------- | -------------------- | ----------------------------------------------------------------- |
+| **`backedUp`** | <code>boolean</code> | false if Health Connect is unavailable or permissions not granted |
+
+
 #### BackfillOptions
 
 | Prop          | Type                          |
@@ -396,17 +391,10 @@ The `hcMetadata` field, when present, is a JSON string containing an array of HC
 | **`windows`** | <code>TrackingWindow[]</code> |
 
 
-#### BackfillResult
-
-| Prop           | Type                  | Description                                                        |
-| -------------- | --------------------- | ------------------------------------------------------------------ |
-| **`backedUp`** | <code>boolean</code>  | false if Health Connect is unavailable or permissions not granted.  |
-
-
 #### ClearDataOptions
 
-| Prop         | Type                | Description                                                                                                    |
-| ------------ | ------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **`before`** | <code>string</code> | ISO 8601 timestamp. Delete all buckets with bucketStart before this time. If omitted, deletes all data.        |
+| Prop         | Type                | Description                                                                                             |
+| ------------ | ------------------- | ------------------------------------------------------------------------------------------------------- |
+| **`before`** | <code>string</code> | ISO 8601 timestamp. Delete all buckets with bucketStart before this time. If omitted, deletes all data. |
 
 </docgen-api>
