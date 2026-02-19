@@ -112,4 +112,10 @@ class StepSensorDatabase private constructor(context: Context) :
             db.delete(TABLE_NAME, null, null)
         }
     }
+
+    fun deleteBefore(before: Instant) {
+        val db = writableDatabase
+        val beforeStr = DateTimeFormatter.ISO_INSTANT.format(before)
+        db.delete(TABLE_NAME, "bucket_start < ?", arrayOf(beforeStr))
+    }
 }

@@ -909,3 +909,54 @@ There are three layers where the same physical steps could be counted twice:
 **Current code** only handles within-tick merging via `MAX(phoneDelta, hcDelta)`. Late-arriving HC data double-counts against phone data already in past buckets.
 
 **Proposed code** handles all three layers. The subtract-and-fill algorithm ensures HC data only adds steps the phone didn't already count. Phone sensor data is always preserved as-is since it has the best per-bucket temporal accuracy.
+
+## Late-Sync Backfill
+
+### The Problem
+
+The foreground service stops at `commitmentEnd`, but watch data may not sync to Health Connect for 15+ minutes after the walk ends. Steps recorded after the service stops are never processed — they're lost. This is the biggest data accuracy gap in the plugin.
+
+### The Solution: `backfillFromHealthConnect()`
+
+The plugin exposes a `backfillFromHealthConnect()` method that the consuming app calls on each app open. It reads HC data for past commitment windows using `readRecords()` (explicit time-range queries), runs subtract-and-fill against the existing SQLite data, and writes the results.
+
+No foreground service is needed — HC reads work from any context.
+
+### Why readRecords() Instead of getChanges()
+
+The live service uses `getChanges(token)` for real-time HC polling. For backfill, we use `readRecords(timeRangeFilter)` instead. This is strictly better because:
+
+1. **No token management** — `readRecords` queries by time range, no token to persist/consume
+2. **Idempotent** — safe to call multiple times (MAX upsert prevents double-counting)
+3. **No data loss** — works even if the service never started, or tokens were lost on crash/force-stop
+4. **Multi-commitment handling is automatic** — an HC record spanning 09:58–10:05 is returned by both the 09:00–10:00 query and the 10:00–11:00 query; `subtractAndFill` clamps each to its commitment window, and MAX upsert in DB ensures correctness
+
+This completely sidesteps the token consumption issue — there's no token to advance, so there's nothing to "consume" that would prevent processing the same record against multiple windows.
+
+### Recommended App-Side Integration
+
+```typescript
+import { App } from '@capacitor/app';
+import { StepSensor } from 'capacitor-step-sensor';
+
+// On every app resume, backfill past commitment windows
+App.addListener('appStateChange', async ({ isActive }) => {
+  if (isActive) {
+    const pastWindows = getPastCommitmentWindows(); // your app logic
+    if (pastWindows.length > 0) {
+      await StepSensor.backfillFromHealthConnect({ windows: pastWindows });
+    }
+  }
+});
+```
+
+### Data Cleanup
+
+The `deleteAfterRead` option on `getTrackedSteps()` has been removed — it was a footgun that could delete rows before late syncs arrive, breaking subtract-and-fill. Use `clearData()` instead for explicit data cleanup:
+
+```typescript
+// Delete data older than 30 days
+await StepSensor.clearData({
+  before: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+});
+```

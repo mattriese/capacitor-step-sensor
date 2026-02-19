@@ -1,6 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { StepSensorPlugin } from './definitions';
+import type { BackfillResult, StepSensorPlugin } from './definitions';
 
 export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
   async scheduleStepTracking(): Promise<void> {
@@ -19,5 +19,13 @@ export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
     steps: Array<{ bucketStart: string; bucketEnd: string; steps: number }>;
   }> {
     return { steps: [] };
+  }
+
+  async backfillFromHealthConnect(): Promise<BackfillResult> {
+    return { backedUp: false };
+  }
+
+  async clearData(): Promise<void> {
+    // No-op on web
   }
 }

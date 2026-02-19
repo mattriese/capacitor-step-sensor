@@ -19,8 +19,20 @@ export interface StartStepTrackingOptions {
 export interface GetTrackedStepsOptions {
   /** ISO 8601 timestamp. Only return buckets starting at or after this time. */
   since?: string;
-  /** If true, delete returned rows from the local database after reading. */
-  deleteAfterRead?: boolean;
+}
+
+export interface BackfillOptions {
+  windows: TrackingWindow[];
+}
+
+export interface BackfillResult {
+  /** false if Health Connect is unavailable or permissions not granted */
+  backedUp: boolean;
+}
+
+export interface ClearDataOptions {
+  /** ISO 8601 timestamp. Delete all buckets with bucketStart before this time. If omitted, deletes all data. */
+  before?: string;
 }
 
 export interface HcRecord {
@@ -77,7 +89,26 @@ export interface StepSensorPlugin {
   /**
    * Read accumulated step data from the local sensor log.
    * Returns all rows since the given timestamp (or all rows if no timestamp).
-   * Optionally deletes returned rows after reading (consume pattern).
    */
   getTrackedSteps(options?: GetTrackedStepsOptions): Promise<GetTrackedStepsResult>;
+
+  /**
+   * Backfill step data from Health Connect for past commitment windows.
+   * Reads HC data using readRecords() (explicit time-range queries), runs
+   * subtract-and-fill against existing SQLite data, and writes the results.
+   * Safe to call multiple times (idempotent via MAX upsert).
+   *
+   * Call this on every app resume to capture steps recorded after the
+   * foreground service stopped (watch data may sync 15+ minutes late).
+   *
+   * On iOS/web, resolves with { backedUp: false } (no-op).
+   */
+  backfillFromHealthConnect(options: BackfillOptions): Promise<BackfillResult>;
+
+  /**
+   * Delete step data from the local database.
+   * If `before` is provided, deletes all buckets with bucketStart before that time.
+   * If omitted, deletes all data.
+   */
+  clearData(options?: ClearDataOptions): Promise<void>;
 }

@@ -26,8 +26,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONArray
-import org.json.JSONObject
 import java.time.Instant
 
 class StepCounterService : Service(), SensorEventListener {
@@ -303,20 +301,6 @@ class StepCounterService : Service(), SensorEventListener {
         }
     }
 
-    private fun serializeHcRecords(records: List<HcStepRecord>): String {
-        val jsonArray = JSONArray()
-        for (record in records) {
-            val obj = JSONObject().apply {
-                put("startTime", record.startTime.toString())
-                put("endTime", record.endTime.toString())
-                put("count", record.count)
-                put("dataOrigin", record.dataOrigin)
-            }
-            jsonArray.put(obj)
-        }
-        return jsonArray.toString()
-    }
-
     // --- Timer & Merge Logic ---
 
     private fun startTimer() {
@@ -350,7 +334,7 @@ class StepCounterService : Service(), SensorEventListener {
                 return@launch
             }
 
-            val hcRecordsJson = serializeHcRecords(hcRecords)
+            val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
 
             // Determine the time range covered by HC records
             val hcStart = hcRecords.minOf { it.startTime }

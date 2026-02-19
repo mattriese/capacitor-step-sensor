@@ -1,5 +1,7 @@
 package com.deloreanhovercraft.capacitor.stepsensor
 
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.Instant
 import kotlin.math.max
 
@@ -228,5 +230,19 @@ object StepTrackingLogic {
             }
         }
         return result
+    }
+
+    fun serializeHcRecords(records: List<HcStepRecord>): String {
+        val jsonArray = JSONArray()
+        for (record in records) {
+            val obj = JSONObject().apply {
+                put("startTime", record.startTime.toString())
+                put("endTime", record.endTime.toString())
+                put("count", record.count)
+                put("dataOrigin", record.dataOrigin)
+            }
+            jsonArray.put(obj)
+        }
+        return jsonArray.toString()
     }
 }

@@ -207,6 +207,62 @@ class StepSensorDatabaseTest {
         assertEquals(0, db.getStepsSince(null).size)
     }
 
+    // --- deleteBefore ---
+
+    @Test
+    fun `deleteBefore removes rows with bucket_start before threshold`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:00:30Z"), 20
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 30
+        )
+
+        db.deleteBefore(Instant.parse("2026-01-15T10:00:00Z"))
+
+        val remaining = db.getStepsSince(null)
+        assertEquals(2, remaining.size)
+        assertEquals("2026-01-15T10:00:00Z", remaining[0].bucketStart)
+        assertEquals("2026-01-15T12:00:00Z", remaining[1].bucketStart)
+    }
+
+    @Test
+    fun `deleteBefore keeps rows at or after threshold`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:00:30Z"), 20
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 30
+        )
+
+        db.deleteBefore(Instant.parse("2026-01-15T10:00:00Z"))
+
+        val remaining = db.getStepsSince(null)
+        assertEquals(2, remaining.size) // Both rows at/after threshold survive
+    }
+
+    @Test
+    fun `deleteBefore with no matching rows is a no-op`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 30
+        )
+
+        db.deleteBefore(Instant.parse("2026-01-15T10:00:00Z"))
+
+        val remaining = db.getStepsSince(null)
+        assertEquals(1, remaining.size)
+        assertEquals(30, remaining[0].steps)
+    }
+
     // --- hcMetadata ---
 
     @Test

@@ -99,11 +99,47 @@ for (const bucket of result.steps) {
 const recent = await StepSensor.getTrackedSteps({
   since: '2025-03-15T09:00:00.000Z',
 });
+```
 
-// Read and delete (consume pattern -- clears data after reading)
-const consumed = await StepSensor.getTrackedSteps({
-  since: lastSyncTimestamp,
-  deleteAfterRead: true,
+### 5. Backfill from Health Connect (recommended)
+
+Watch data may not sync to Health Connect until 15+ minutes after a walk ends. Steps recorded after the foreground service stops would be missed without backfill. Call `backfillFromHealthConnect()` on every app resume to capture late-arriving data:
+
+```typescript
+// On every app resume, backfill past commitment windows
+const { backedUp } = await StepSensor.backfillFromHealthConnect({
+  windows: [
+    {
+      startAt: '2025-03-15T09:00:00.000Z',
+      endAt: '2025-03-15T10:00:00.000Z',
+    },
+    {
+      startAt: '2025-03-15T14:00:00.000Z',
+      endAt: '2025-03-15T15:30:00.000Z',
+    },
+  ],
+});
+
+if (backedUp) {
+  console.log('Health Connect backfill complete');
+}
+```
+
+This is safe to call multiple times -- the MAX upsert in SQLite prevents double-counting. It uses `readRecords()` (explicit time-range queries) rather than `getChanges()`, so there's no token to manage and it works even if the service never started.
+
+On iOS/web, this resolves with `{ backedUp: false }` (no-op).
+
+### 6. Clear data
+
+Use `clearData()` to delete step data from the local database:
+
+```typescript
+// Delete all data
+await StepSensor.clearData();
+
+// Delete data older than a specific time
+await StepSensor.clearData({
+  before: '2025-03-01T00:00:00.000Z',
 });
 ```
 
@@ -130,6 +166,8 @@ See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm de
 * [`startStepTracking(...)`](#startsteptracking)
 * [`stopStepTracking()`](#stopsteptracking)
 * [`getTrackedSteps(...)`](#gettrackedsteps)
+* [`backfillFromHealthConnect(...)`](#backfillfromhealthconnect)
+* [`clearData(...)`](#cleardata)
 * [Interfaces](#interfaces)
 
 </docgen-index>
@@ -199,13 +237,54 @@ getTrackedSteps(options?: GetTrackedStepsOptions | undefined) => Promise<GetTrac
 
 Read accumulated step data from the local sensor log.
 Returns all rows since the given timestamp (or all rows if no timestamp).
-Optionally deletes returned rows after reading (consume pattern).
 
 | Param         | Type                                                                      |
 | ------------- | ------------------------------------------------------------------------- |
 | **`options`** | <code><a href="#gettrackedstepsoptions">GetTrackedStepsOptions</a></code> |
 
 **Returns:** <code>Promise&lt;<a href="#gettrackedstepsresult">GetTrackedStepsResult</a>&gt;</code>
+
+--------------------
+
+
+### backfillFromHealthConnect(...)
+
+```typescript
+backfillFromHealthConnect(options: BackfillOptions) => Promise<BackfillResult>
+```
+
+Backfill step data from Health Connect for past commitment windows.
+Reads HC data using readRecords() (explicit time-range queries), runs
+subtract-and-fill against existing SQLite data, and writes the results.
+Safe to call multiple times (idempotent via MAX upsert).
+
+Call this on every app resume to capture steps recorded after the
+foreground service stopped (watch data may sync 15+ minutes late).
+
+On iOS/web, resolves with { backedUp: false } (no-op).
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code><a href="#backfilloptions">BackfillOptions</a></code>   |
+
+**Returns:** <code>Promise&lt;<a href="#backfillresult">BackfillResult</a>&gt;</code>
+
+--------------------
+
+
+### clearData(...)
+
+```typescript
+clearData(options?: ClearDataOptions | undefined) => Promise<void>
+```
+
+Delete step data from the local database.
+If `before` is provided, deletes all buckets with bucketStart before that time.
+If omitted, deletes all data.
+
+| Param         | Type                                                              |
+| ------------- | ----------------------------------------------------------------- |
+| **`options`** | <code><a href="#cleardataoptions">ClearDataOptions</a></code>     |
 
 --------------------
 
@@ -267,9 +346,29 @@ The `hcMetadata` field, when present, is a JSON string containing an array of HC
 
 #### GetTrackedStepsOptions
 
-| Prop                  | Type                 | Description                                                             |
-| --------------------- | -------------------- | ----------------------------------------------------------------------- |
-| **`since`**           | <code>string</code>  | ISO 8601 timestamp. Only return buckets starting at or after this time. |
-| **`deleteAfterRead`** | <code>boolean</code> | If true, delete returned rows from the local database after reading.    |
+| Prop        | Type                | Description                                                             |
+| ----------- | ------------------- | ----------------------------------------------------------------------- |
+| **`since`** | <code>string</code> | ISO 8601 timestamp. Only return buckets starting at or after this time. |
+
+
+#### BackfillOptions
+
+| Prop          | Type                          |
+| ------------- | ----------------------------- |
+| **`windows`** | <code>TrackingWindow[]</code> |
+
+
+#### BackfillResult
+
+| Prop           | Type                  | Description                                                        |
+| -------------- | --------------------- | ------------------------------------------------------------------ |
+| **`backedUp`** | <code>boolean</code>  | false if Health Connect is unavailable or permissions not granted.  |
+
+
+#### ClearDataOptions
+
+| Prop         | Type                | Description                                                                                                    |
+| ------------ | ------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **`before`** | <code>string</code> | ISO 8601 timestamp. Delete all buckets with bucketStart before this time. If omitted, deletes all data.        |
 
 </docgen-api>
