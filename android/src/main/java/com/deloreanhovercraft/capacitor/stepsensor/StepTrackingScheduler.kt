@@ -41,12 +41,10 @@ class StepTrackingScheduler(private val context: Context) {
         val now = Instant.now()
 
         // Filter and process windows
-        val validWindows = windows
-            .filter { it.endAt.isAfter(now) } // Skip windows that have already ended
-            .sortedBy { it.startAt }
+        val validWindows = StepTrackingLogic.filterAndSortWindows(windows, now)
 
         // Merge overlapping windows
-        val merged = mergeOverlapping(validWindows)
+        val merged = StepTrackingLogic.mergeOverlapping(validWindows)
 
         // Persist for reboot recovery
         persistWindows(merged)
@@ -137,29 +135,6 @@ class StepTrackingScheduler(private val context: Context) {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         val pendingIntent = PendingIntent.getBroadcast(context, requestCode, intent, flags)
         alarmManager.cancel(pendingIntent)
-    }
-
-    private fun mergeOverlapping(windows: List<TrackingWindow>): List<TrackingWindow> {
-        if (windows.isEmpty()) return emptyList()
-
-        val result = mutableListOf<TrackingWindow>()
-        var current = windows[0]
-
-        for (i in 1 until windows.size) {
-            val next = windows[i]
-            if (!next.startAt.isAfter(current.endAt)) {
-                // Overlapping or adjacent — merge
-                current = TrackingWindow(
-                    startAt = current.startAt,
-                    endAt = if (next.endAt.isAfter(current.endAt)) next.endAt else current.endAt
-                )
-            } else {
-                result.add(current)
-                current = next
-            }
-        }
-        result.add(current)
-        return result
     }
 
     private fun persistWindows(windows: List<TrackingWindow>) {

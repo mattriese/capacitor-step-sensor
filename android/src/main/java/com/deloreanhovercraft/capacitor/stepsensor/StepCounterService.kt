@@ -204,23 +204,11 @@ class StepCounterService : Service(), SensorEventListener {
     }
 
     private fun recordPhoneSensorInterval(): Long {
-        val currentCount = latestSensorValue
-        if (currentCount < 0) return 0
-
-        val delta = if (lastSensorCount >= 0) {
-            if (currentCount >= lastSensorCount) {
-                currentCount - lastSensorCount
-            } else {
-                // Reboot detected — counter reset to 0
-                Log.d(TAG, "Sensor counter reset detected (reboot?). Resetting baseline.")
-                0
-            }
-        } else {
-            // First reading — establish baseline, no delta yet
-            0
+        val (delta, newBaseline) = StepTrackingLogic.computeSensorDelta(latestSensorValue, lastSensorCount)
+        if (delta == 0L && latestSensorValue >= 0 && lastSensorCount >= 0 && latestSensorValue < lastSensorCount) {
+            Log.d(TAG, "Sensor counter reset detected (reboot?). Resetting baseline.")
         }
-
-        lastSensorCount = currentCount
+        lastSensorCount = newBaseline
         return delta
     }
 
@@ -341,22 +329,15 @@ class StepCounterService : Service(), SensorEventListener {
 
         scope.launch {
             val hcDelta = recordHcInterval()
-            val steps = max(phoneDelta, hcDelta).toInt()
+            val steps = StepTrackingLogic.mergeStepSources(phoneDelta, hcDelta)
 
             val now = Instant.now()
-            val bucketEnd = floorTo30Seconds(now)
-            val bucketStart = bucketEnd.minusSeconds(30)
+            val (bucketStart, bucketEnd) = StepTrackingLogic.computeBucketBoundaries(now)
 
             if (steps > 0) {
                 database.insertOrUpdate(bucketStart, bucketEnd, steps)
                 Log.d(TAG, "Recorded $steps steps (phone=$phoneDelta, hc=$hcDelta) for bucket $bucketStart")
             }
         }
-    }
-
-    private fun floorTo30Seconds(instant: Instant): Instant {
-        val epochSecond = instant.epochSecond
-        val floored = epochSecond - (epochSecond % 30)
-        return Instant.ofEpochSecond(floored)
     }
 }
