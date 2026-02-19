@@ -23,6 +23,13 @@ export interface GetTrackedStepsOptions {
   deleteAfterRead?: boolean;
 }
 
+export interface HcRecord {
+  startTime: string;
+  endTime: string;
+  count: number;
+  dataOrigin: string;
+}
+
 export interface StepBucket {
   /** ISO 8601 timestamp for the start of this 30-second bucket. */
   bucketStart: string;
@@ -30,6 +37,8 @@ export interface StepBucket {
   bucketEnd: string;
   /** Number of steps recorded in this bucket. */
   steps: number;
+  /** Raw Health Connect records JSON, if HC data contributed to this bucket. */
+  hcMetadata?: string;
 }
 
 export interface GetTrackedStepsResult {

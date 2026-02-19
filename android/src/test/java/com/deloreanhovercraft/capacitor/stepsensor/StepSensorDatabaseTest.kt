@@ -206,4 +206,78 @@ class StepSensorDatabaseTest {
         db.deleteStepsSince(null)
         assertEquals(0, db.getStepsSince(null).size)
     }
+
+    // --- hcMetadata ---
+
+    @Test
+    fun `insert with hcMetadata`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+        val metadata = """[{"startTime":"2026-01-15T10:00:00Z","count":120}]"""
+        db.insertOrUpdate(start, end, 45, metadata)
+
+        val results = db.getStepsSince(null)
+        assertEquals(1, results.size)
+        assertEquals(metadata, results[0].hcMetadata)
+    }
+
+    @Test
+    fun `insert without hcMetadata has null`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+        db.insertOrUpdate(start, end, 45)
+
+        val results = db.getStepsSince(null)
+        assertEquals(1, results.size)
+        assertNull(results[0].hcMetadata)
+    }
+
+    @Test
+    fun `MAX upsert preserves existing metadata when new is null`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+        val metadata = """[{"count":120}]"""
+
+        db.insertOrUpdate(start, end, 30, metadata)
+        db.insertOrUpdate(start, end, 45) // higher steps, null metadata
+
+        val results = db.getStepsSince(null)
+        assertEquals(1, results.size)
+        assertEquals(45, results[0].steps)
+        assertEquals(metadata, results[0].hcMetadata) // preserved
+    }
+
+    @Test
+    fun `MAX upsert replaces metadata when new is non-null`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+        val oldMeta = """[{"count":60}]"""
+        val newMeta = """[{"count":120}]"""
+
+        db.insertOrUpdate(start, end, 30, oldMeta)
+        db.insertOrUpdate(start, end, 45, newMeta) // higher steps, new metadata
+
+        val results = db.getStepsSince(null)
+        assertEquals(1, results.size)
+        assertEquals(45, results[0].steps)
+        assertEquals(newMeta, results[0].hcMetadata)
+    }
+
+    @Test
+    fun `getStepsSince returns hcMetadata field`() {
+        val meta = """[{"startTime":"2026-01-15T09:00:00Z","count":100}]"""
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 20, meta
+        )
+
+        val results = db.getStepsSince(null)
+        assertEquals(2, results.size)
+        assertNull(results[0].hcMetadata)     // phone-only bucket
+        assertEquals(meta, results[1].hcMetadata) // HC-enriched bucket
+    }
 }

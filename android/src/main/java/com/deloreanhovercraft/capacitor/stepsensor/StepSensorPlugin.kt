@@ -145,6 +145,9 @@ class StepSensorPlugin : Plugin() {
                     put("bucketStart", bucket.bucketStart)
                     put("bucketEnd", bucket.bucketEnd)
                     put("steps", bucket.steps)
+                    if (bucket.hcMetadata != null) {
+                        put("hcMetadata", bucket.hcMetadata)
+                    }
                 }
                 stepsArray.put(obj)
             }

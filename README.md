@@ -109,14 +109,18 @@ const consumed = await StepSensor.getTrackedSteps({
 
 ## How It Works
 
-The Android foreground service uses two data sources and takes the higher value each interval:
+The Android foreground service uses two data sources:
 
 | Source | What it reads | Granularity | Limitation |
 | --- | --- | --- | --- |
 | Phone sensor (`TYPE_STEP_COUNTER`) | Phone's hardware accelerometer | Exact 30-second buckets | Misses steps when the phone is on a desk |
-| Health Connect poller (`getChanges`) | Watch steps synced via companion app | ~2-5 minute batches | Depends on companion app sync cadence |
+| Health Connect poller (`getChanges`) | Watch steps synced via companion app | ~1-15 minute records | Depends on companion app sync cadence |
 
-Every 30 seconds, the service computes `MAX(phoneDelta, healthConnectDelta)` and writes the result to SQLite. This avoids double-counting while capturing both phone-carried and watch-only activity.
+Every 30 seconds, the service writes phone sensor steps to the current bucket. When Health Connect records arrive (e.g., from a watch sync), the service uses a **subtract-and-fill** algorithm: it subtracts the phone steps already recorded in the covered buckets, then distributes the surplus into only the zero-step buckets (gaps the phone didn't capture). This avoids double-counting while preserving the phone's per-bucket temporal accuracy.
+
+**Commitment boundary handling:** HC records that overlap the start or end of a scheduled tracking window are fully credited (all steps count), but only written to buckets within the window. Each zero-step bucket is capped at 90 steps/30s (180 steps/min) to filter physically impossible values.
+
+See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm design.
 
 ## API Reference
 
@@ -241,11 +245,24 @@ Optionally deletes returned rows after reading (consume pattern).
 
 #### StepBucket
 
-| Prop              | Type                | Description                                                |
-| ----------------- | ------------------- | ---------------------------------------------------------- |
-| **`bucketStart`** | <code>string</code> | ISO 8601 timestamp for the start of this 30-second bucket. |
-| **`bucketEnd`**   | <code>string</code> | ISO 8601 timestamp for the end of this 30-second bucket.   |
-| **`steps`**       | <code>number</code> | Number of steps recorded in this bucket.                   |
+| Prop              | Type                | Description                                                              |
+| ----------------- | ------------------- | ------------------------------------------------------------------------ |
+| **`bucketStart`** | <code>string</code> | ISO 8601 timestamp for the start of this 30-second bucket.               |
+| **`bucketEnd`**   | <code>string</code> | ISO 8601 timestamp for the end of this 30-second bucket.                 |
+| **`steps`**       | <code>number</code> | Number of steps recorded in this bucket.                                 |
+| **`hcMetadata`**  | <code>string</code> | Raw Health Connect records JSON, if HC data contributed to this bucket.   |
+
+
+#### HcRecord
+
+The `hcMetadata` field, when present, is a JSON string containing an array of HC record objects:
+
+| Prop              | Type                | Description                                      |
+| ----------------- | ------------------- | ------------------------------------------------ |
+| **`startTime`**   | <code>string</code> | ISO 8601 timestamp for the start of the record.  |
+| **`endTime`**     | <code>string</code> | ISO 8601 timestamp for the end of the record.    |
+| **`count`**       | <code>number</code> | Number of steps in this HC record.               |
+| **`dataOrigin`**  | <code>string</code> | Package name of the app that wrote the record.   |
 
 
 #### GetTrackedStepsOptions

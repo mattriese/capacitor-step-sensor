@@ -16,6 +16,152 @@ T=2:30  phoneDelta=0, HC delta=240              → bucket [2:00, 2:30] = 240  �
 
 Result: the database says 240 steps happened in a single 30-second window. The total is correct, but the temporal distribution is wrong.
 
+## Double-Counting Bug in the Current Code
+
+The temporal inaccuracy above also causes a **double-counting bug** when the user walks with **both** the phone and the watch.
+
+### Scenario: phone in pocket + watch on wrist, 2 minutes of walking
+
+Both devices independently count the same ~120 physical steps. Our plugin reads the phone sensor directly (not via Health Connect). The watch records independently and syncs to HC later.
+
+```
+T=0:30  phoneDelta=30, hcDelta=0 (watch hasn't synced)
+        MAX(30, 0) = 30 → bucket[0:00] = 30
+
+T=1:00  phoneDelta=32, hcDelta=0 → bucket[0:30] = 32
+T=1:30  phoneDelta=28, hcDelta=0 → bucket[1:00] = 28
+T=2:00  phoneDelta=30, hcDelta=0 → bucket[1:30] = 30
+
+        ↕ Watch syncs ~120 steps to HC covering 0:00–2:00
+
+T=2:30  phoneDelta=31
+        hcDelta = aggregate(COUNT_TOTAL) - lastHcTotal = 120 - 0 = 120
+        MAX(31, 120) = 120 → bucket[2:00] = 120
+
+DB total: 30 + 32 + 28 + 30 + 120 = 240
+Actual physical steps: ~120
+```
+
+**The MAX only operates within a single tick.** At T=2:30 it correctly picks MAX(31, 120) = 120 for that one bucket. But the 120 HC steps cover the same physical activity that the phone already recorded into buckets [0:00]–[1:30]. Those past buckets are never revisited. Result: ~120 phone steps in past buckets + 120 HC steps in the current bucket = 240 in the database. Double the real amount.
+
+The root cause: `recordHcInterval()` returns the total HC delta since last sync as a single number, and `onTimerTick()` writes it to whichever bucket is current. There's no way to MAX it against the phone data that was already written to past buckets, because the HC data lost its time information when it was aggregated.
+
+### How the proposed code fixes this
+
+The key insight: **phone sensor data is real-time and accurate per-bucket**. HC data from the watch is more complete (captures steps when the phone is on a desk) but arrives late with coarser time resolution. So we trust the phone data where it exists and use HC data only to fill in gaps.
+
+**Algorithm: Subtract-and-Fill**
+
+When HC records arrive for a time range:
+1. Sum the phone steps already recorded in the buckets covered by this HC record
+2. Compute the surplus: `hcCount - phoneTotalForRange` (clamp to 0 if negative)
+3. Distribute the surplus into only the buckets that have **0 phone-sensor steps** (the gaps)
+4. **Edge case:** if ALL buckets already have phone steps (no zero-step buckets), SUM the entire surplus into the **last** bucket
+
+#### Example 1: Phone on desk for part of the walk
+
+Phone records `(10, 10, 0, 0)`, watch syncs 120 steps for the same 2-minute range.
+
+```
+Phone total for range: 10 + 10 + 0 + 0 = 20
+Surplus: 120 - 20 = 100
+Zero-step buckets: bucket[1:00], bucket[1:30] → 2 buckets
+Distribute 100 evenly: 50 each
+
+Result: (10, 10, 50, 50) = 130 total
+```
+
+Phone data preserved. Gaps filled. Total = max(phoneTotal, hcTotal) = 120... wait, 130? That's because the phone counted 20 steps that the watch didn't attribute to those specific buckets. The phone's 20 are real, the watch's 120 are real, and the surplus (100) goes into the gaps. The 130 total is correct — it means the phone picked up 10 extra steps in the first two buckets that the watch missed (e.g. the user fidgeted with the phone before putting it down).
+
+Actually, if both devices are counting the same physical steps, the phone total should be ≤ HC total. If phone > HC for the range, surplus is 0 and nothing changes.
+
+#### Example 2: Phone active the whole time, watch counted more
+
+Phone records `(10, 10, 10, 1)`, watch syncs 130 steps.
+
+```
+Phone total for range: 10 + 10 + 10 + 1 = 31
+Surplus: 130 - 31 = 99
+Zero-step buckets: NONE (all buckets have phone data)
+Edge case: SUM surplus into last bucket: 1 + 99 = 100
+
+Result: (10, 10, 10, 100) = 130 total
+```
+
+The last bucket absorbs the surplus. This is imperfect temporally (those 99 steps probably didn't all happen in the last 30 seconds), but the total is correct and the phone data for the first three buckets is preserved exactly.
+
+#### Example 3: Phone counted everything, watch agrees
+
+Phone records `(30, 30, 30, 30)`, watch syncs 120 steps.
+
+```
+Phone total for range: 120
+Surplus: 120 - 120 = 0
+Nothing changes.
+
+Result: (30, 30, 30, 30) = 120 total
+```
+
+#### Example 4: Phone counted more than watch
+
+Phone records `(40, 40, 40, 40)`, watch syncs 120 steps.
+
+```
+Phone total for range: 160
+Surplus: max(0, 120 - 160) = 0
+Nothing changes.
+
+Result: (40, 40, 40, 40) = 160 total
+```
+
+Phone is trusted. The watch may have missed some wrist motion. The phone's per-bucket data is never reduced.
+
+#### Example 5: Phone was off the whole time
+
+Phone records `(0, 0, 0, 0)`, watch syncs 120 steps.
+
+```
+Phone total for range: 0
+Surplus: 120
+Zero-step buckets: all 4
+Distribute 120 evenly: 30 each
+
+Result: (30, 30, 30, 30) = 120 total
+```
+
+Falls back to proportional distribution (same as the simpler approach) when there's no phone data at all.
+
+### Remaining multi-source HC risk and fix
+
+`getChanges()` returns records from **all** apps that write to Health Connect. If Samsung Health writes 120 steps from the watch, and Google Fit also writes 120 steps from the phone's own sensors, the proposed code would **sum** both in `hcBuckets` before writing — resulting in 240, defeating the MAX.
+
+The fix: group HC records by `dataOrigin` and distribute each source independently, then take the **MAX across sources** per bucket instead of summing:
+
+```kotlin
+// Group records by data origin
+val bySource = hcRecords.groupBy { it.metadata.dataOrigin.packageName }
+
+// Distribute each source independently, then MAX across sources per bucket
+val hcBuckets = mutableMapOf<Instant, Int>()
+for ((_, sourceRecords) in bySource) {
+    val sourceBuckets = mutableMapOf<Instant, Int>()
+    for (record in sourceRecords) {
+        val distributed = StepTrackingLogic.distributeRecordIntoBuckets(
+            record.startTime, record.endTime, record.count
+        )
+        for ((bucketStart, steps) in distributed) {
+            sourceBuckets[bucketStart] = (sourceBuckets[bucketStart] ?: 0) + steps
+        }
+    }
+    // MAX across sources, not sum
+    for ((bucketStart, steps) in sourceBuckets) {
+        hcBuckets[bucketStart] = max(hcBuckets[bucketStart] ?: 0, steps)
+    }
+}
+```
+
+This mirrors the same MAX strategy used between the phone sensor and HC — always take the higher of two independent measurements of the same physical activity, never add them.
+
 ## Three Levels of Granularity
 
 There are three layers involved, each with different time resolution:
@@ -38,7 +184,7 @@ There are three layers involved, each with different time resolution:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**The StepsRecord granularity is coarser than our 30-second buckets.** When a single StepsRecord spans, say, 10 minutes (twenty 30s buckets), we distribute steps proportionally — which assumes even pacing within the record. This is an approximation, but a much better one than "all 240 steps in one bucket."
+**The StepsRecord granularity is coarser than our 30-second buckets.** When a single StepsRecord spans, say, 10 minutes (twenty 30s buckets), we use the subtract-and-fill algorithm: subtract the phone steps already counted, then distribute the surplus evenly into the zero-step buckets (where the phone had no readings). This preserves accurate phone data and only fills gaps with watch data.
 
 The exact granularity Samsung Health uses when writing StepsRecord entries to Health Connect is an implementation detail Samsung does not publicly document. Their FAQ states that Galaxy Watch sync timing "follows its own policy" for battery reasons. Developer observations suggest records typically cover 1-15 minute intervals, but this could vary by device, Samsung Health version, or activity type.
 
@@ -214,10 +360,10 @@ This produces a single number (e.g. 240) with no time information.
 ### Proposed: `collectHcRecords()` replaces `recordHcInterval()`
 
 ```
-getChanges(token) → cast UpsertionChange.record to StepsRecord → distribute into 30s buckets
+getChanges(token) → cast UpsertionChange.record to StepsRecord → subtract phone steps → fill zero-step buckets
 ```
 
-This produces a map of `bucketStart → steps` with temporal attribution, plus raw records stored as metadata for diagnostics.
+This produces a map of `bucketStart → steps` representing only the surplus the watch counted beyond the phone's readings. Phone sensor data is never overwritten. Raw records stored as metadata for diagnostics.
 
 ## Detailed Design
 
@@ -263,120 +409,185 @@ private suspend fun collectHcRecords(): List<StepsRecord> {
 }
 ```
 
-### 2. Distribute records into 30-second buckets
+### 2. Subtract-and-fill: distribute HC surplus into empty buckets
 
-A single `StepsRecord` will typically span multiple 30-second buckets (e.g. a record covering 10:00:00 to 10:10:00 spans twenty 30s buckets). Since we don't know the step distribution within the record, we distribute proportionally — assuming even pacing within the record's time window:
+The core algorithm. For each HC record, we subtract the phone steps already counted in the overlapping buckets, then distribute the surplus into only the zero-step buckets:
 
 ```kotlin
-// New function in StepTrackingLogic.kt
-fun distributeRecordIntoBuckets(
+// In StepTrackingLogic.kt
+fun subtractAndFill(
     recordStart: Instant,
     recordEnd: Instant,
-    count: Long
+    hcCount: Long,
+    existingBuckets: Map<Instant, Int>,  // current phone-sensor data in DB
+    commitmentStart: Instant,            // commitment window start (inclusive)
+    commitmentEnd: Instant,              // commitment window end (exclusive)
+    perBucketCap: Int = MAX_STEPS_PER_BUCKET  // 90 steps/30s
 ): Map<Instant, Int> {
-    if (count <= 0 || !recordEnd.isAfter(recordStart)) return emptyMap()
+    if (hcCount <= 0 || !recordEnd.isAfter(recordStart)) return emptyMap()
 
-    val totalSeconds = recordEnd.epochSecond - recordStart.epochSecond
-    if (totalSeconds <= 0) return emptyMap()
-
-    val buckets = mutableMapOf<Instant, Int>()
-
-    // Walk through each 30s bucket that this record overlaps
+    // Enumerate all 30s buckets this record covers
+    val allBuckets = mutableListOf<Instant>()
     var cursor = floorTo30Seconds(recordStart)
     while (cursor.isBefore(recordEnd)) {
-        val bucketEnd = cursor.plusSeconds(30)
+        allBuckets.add(cursor)
+        cursor = cursor.plusSeconds(30)
+    }
+    if (allBuckets.isEmpty()) return emptyMap()
 
-        // Calculate overlap between [cursor, bucketEnd) and [recordStart, recordEnd)
-        val overlapStart = if (recordStart.isAfter(cursor)) recordStart else cursor
-        val overlapEnd = if (recordEnd.isBefore(bucketEnd)) recordEnd else bucketEnd
-        val overlapSeconds = overlapEnd.epochSecond - overlapStart.epochSecond
+    // Clamp to commitment window — only keep in-window buckets
+    val inWindowBuckets = allBuckets.filter { bucket ->
+        !bucket.isBefore(commitmentStart) && bucket.isBefore(commitmentEnd)
+    }
+    if (inWindowBuckets.isEmpty()) return emptyMap()
 
-        if (overlapSeconds > 0) {
-            val steps = (count * overlapSeconds / totalSeconds).toInt()
-            if (steps > 0) {
-                buckets[cursor] = (buckets[cursor] ?: 0) + steps
+    // Sum phone steps in in-window buckets only
+    val phoneTotal = inWindowBuckets.sumOf { existingBuckets[it] ?: 0 }
+
+    // Full inclusion: entire hcCount, not proportional
+    val surplus = max(0, hcCount - phoneTotal)
+    if (surplus == 0L) return emptyMap()
+
+    val zeroBuckets = inWindowBuckets.filter { (existingBuckets[it] ?: 0) == 0 }
+    val result = mutableMapOf<Instant, Int>()
+
+    if (zeroBuckets.isNotEmpty()) {
+        val totalCapacity = zeroBuckets.size.toLong() * perBucketCap
+        if (surplus <= totalCapacity) {
+            // Fits within caps — distribute evenly
+            val perBucket = (surplus / zeroBuckets.size).toInt()
+            val remainder = (surplus % zeroBuckets.size).toInt()
+            for ((i, bucket) in zeroBuckets.withIndex()) {
+                result[bucket] = perBucket + if (i < remainder) 1 else 0
             }
+        } else {
+            // Overflow: fill each zero bucket to cap, leftover to last bucket (uncapped)
+            for (bucket in zeroBuckets) { result[bucket] = perBucketCap }
+            val leftover = (surplus - totalCapacity).toInt()
+            val lastBucket = inWindowBuckets.last()
+            val existing = existingBuckets[lastBucket] ?: 0
+            result[lastBucket] = (result[lastBucket] ?: existing) + leftover
         }
-
-        cursor = bucketEnd
+    } else {
+        // No zero buckets: all surplus to last in-window bucket (uncapped)
+        val lastBucket = inWindowBuckets.last()
+        val existing = existingBuckets[lastBucket] ?: 0
+        result[lastBucket] = existing + surplus.toInt()
     }
 
-    // Assign any rounding remainder to the last bucket with steps
-    val distributed = buckets.values.sum()
-    val remainder = count.toInt() - distributed
-    if (remainder > 0 && buckets.isNotEmpty()) {
-        val lastKey = buckets.keys.maxBy { it.epochSecond }
-        buckets[lastKey] = buckets[lastKey]!! + remainder
-    }
-
-    return buckets
+    return result
 }
 ```
 
-### 3. Revised `onTimerTick()`
+### 3. Handle multiple HC data origins
+
+Multiple apps can write step data to Health Connect (Samsung Health from a watch, Google Fit from the phone, etc.). We group by `dataOrigin`, run subtract-and-fill for each source independently, then take MAX across sources per bucket:
+
+```kotlin
+// In StepTrackingLogic.kt
+fun processHcRecords(
+    records: List<HcStepRecord>,
+    existingBuckets: Map<Instant, Int>,
+    commitmentStart: Instant,
+    commitmentEnd: Instant,
+    perBucketCap: Int = MAX_STEPS_PER_BUCKET
+): Map<Instant, Int> {
+    if (records.isEmpty()) return emptyMap()
+
+    // Group by data origin — each source measured the same physical steps independently
+    val bySource = records.groupBy { it.dataOrigin }
+
+    val result = mutableMapOf<Instant, Int>()
+    for ((_, sourceRecords) in bySource) {
+        val sourceBuckets = mutableMapOf<Instant, Int>()
+        for (record in sourceRecords) {
+            val filled = subtractAndFill(
+                record.startTime, record.endTime, record.count,
+                existingBuckets, commitmentStart, commitmentEnd, perBucketCap
+            )
+            for ((bucketStart, steps) in filled) {
+                sourceBuckets[bucketStart] = max(sourceBuckets[bucketStart] ?: 0, steps)
+            }
+        }
+        for ((bucketStart, steps) in sourceBuckets) {
+            result[bucketStart] = max(result[bucketStart] ?: 0, steps)
+        }
+    }
+    return result
+}
+```
+
+The logic: different data origins (Samsung Health, Google Fit) are independent measurements of the same physical steps. We run subtract-and-fill for each source independently, then MAX across sources per bucket.
+
+### 4. Revised `onTimerTick()`
 
 Instead of merging a single phone delta with a single HC delta, the tick now:
 1. Records the phone sensor delta for the current bucket (same as before)
-2. Collects any new HC StepsRecord entries and distributes them across their correct buckets
-3. For the current bucket: MAX(phoneDelta, hcBucketDelta) as before
-4. For past buckets that only HC contributed to: write directly
-5. Stores raw StepsRecord data as JSON metadata on the affected buckets
+2. Writes the phone delta to the current bucket immediately (phone data is always trusted)
+3. Collects any new HC StepsRecord entries
+4. Reads existing bucket data from the DB for the time range covered by the HC records
+5. Runs subtract-and-fill to compute what the watch counted beyond the phone's total
+6. Writes the filled values to the appropriate buckets
+7. Stores raw StepsRecord data as JSON metadata on the affected buckets
 
 ```kotlin
 private fun onTimerTick() {
     val phoneDelta = recordPhoneSensorInterval()
 
     scope.launch {
-        val hcRecords = collectHcRecords()
-
-        // Distribute all HC records into their correct 30s buckets
-        val hcBuckets = mutableMapOf<Instant, Int>()
-        for (record in hcRecords) {
-            val distributed = StepTrackingLogic.distributeRecordIntoBuckets(
-                record.startTime, record.endTime, record.count
-            )
-            for ((bucketStart, steps) in distributed) {
-                hcBuckets[bucketStart] = (hcBuckets[bucketStart] ?: 0) + steps
-            }
-        }
-
-        // Serialize raw HC records for diagnostics
-        val hcRecordsJson = if (hcRecords.isNotEmpty()) {
-            StepTrackingLogic.serializeHcRecords(hcRecords)
-        } else null
-
         val now = Instant.now()
         val (currentBucketStart, currentBucketEnd) = StepTrackingLogic.computeBucketBoundaries(now)
 
-        // Write HC steps to their correct past buckets
-        for ((bucketStart, hcSteps) in hcBuckets) {
-            if (bucketStart == currentBucketStart) continue  // handle below with phone merge
-            if (hcSteps > 0) {
-                database.insertOrUpdate(
-                    bucketStart, bucketStart.plusSeconds(30), hcSteps, hcRecordsJson
-                )
-            }
+        // Always write phone data first — it's real-time and per-bucket accurate
+        if (phoneDelta > 0) {
+            database.insertOrUpdate(currentBucketStart, currentBucketEnd, phoneDelta.toInt())
         }
 
-        // Current bucket: MAX(phone, hc) — same merge strategy as before
-        val hcCurrentBucket = hcBuckets[currentBucketStart] ?: 0
-        val steps = StepTrackingLogic.mergeStepSources(phoneDelta, hcCurrentBucket.toLong())
+        val hcRecords = collectHcRecords()
+        if (hcRecords.isEmpty()) return@launch
 
-        if (steps > 0) {
-            database.insertOrUpdate(currentBucketStart, currentBucketEnd, steps, hcRecordsJson)
+        // Serialize raw HC records for diagnostics
+        val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
+
+        // Determine the time range covered by HC records
+        val hcStart = hcRecords.minOf { it.startTime }
+        val hcEnd = hcRecords.maxOf { it.endTime }
+
+        // Read existing bucket data from DB for the covered range
+        val existingRows = database.getStepsSince(hcStart.toString())
+        val existingBuckets = existingRows
+            .filter { Instant.parse(it.bucketStart).isBefore(hcEnd) }
+            .associate { Instant.parse(it.bucketStart) to it.steps }
+
+        // Subtract-and-fill: compute surplus from watch beyond phone's total,
+        // distribute into zero-step buckets only
+        val filledBuckets = StepTrackingLogic.processHcRecords(hcRecords, existingBuckets)
+
+        // Write filled values to DB
+        for ((bucketStart, steps) in filledBuckets) {
+            if (steps > 0) {
+                val bucketEnd = bucketStart.plusSeconds(30)
+                // Use direct insert/update (not MAX upsert) since subtractAndFill
+                // already computed the correct final value for each bucket.
+                // For zero-step buckets: this is a fresh INSERT.
+                // For the edge-case last bucket: this is the SUM value.
+                database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
+            }
         }
     }
 }
 ```
 
-### 4. What gets removed
+**Note on the SQLite upsert:** For the subtract-and-fill algorithm, the edge-case path (no zero-step buckets, SUM into last bucket) returns the **final value** (existing + surplus), not just the surplus. So the `MAX(steps, excluded.steps)` upsert still works correctly — the new value is always ≥ the existing value.
+
+### 5. What gets removed
 
 - `lastHcTotal: Long` field — no longer needed (we don't track running totals)
 - `getHcTotalSteps()` method — no longer needed (we don't aggregate)
 - `trackingStartTime` — no longer needed for HC (still used elsewhere if applicable)
 - The `AggregateRequest` import and usage
 
-### 5. Schema change: add `hc_metadata` column
+### 6. Schema change: add `hc_metadata` column
 
 Add a nullable TEXT column to store the raw Health Connect StepsRecord data as JSON. This gives the consuming app full visibility into what HC actually provided — the original time ranges, step counts, data origins, and device info — so it can implement its own analysis or diagnostics without relying on our proportional distribution.
 
@@ -516,10 +727,10 @@ interface HcRecord {
 No splitting needed. The record's count goes directly to that bucket.
 
 ### HC record spans many buckets (e.g. 10-minute Samsung Health record)
-Steps distributed proportionally assuming even pacing. A 10-minute record with 600 steps spanning twenty 30s buckets gives ~30 steps per bucket. Remainder from integer rounding assigned to the last bucket. The raw record is preserved in `hc_metadata` so the consuming app knows this was an approximation.
+Subtract-and-fill computes the surplus (hcCount - phoneTotal for the range), then distributes evenly across zero-step buckets only. If the phone was active for some of those buckets, only the remaining gap buckets receive steps. Remainder from integer division goes to the last zero-step bucket. The raw record is preserved in `hc_metadata` so the consuming app has full visibility.
 
-### Multiple HC records for the same time range (e.g. phone + watch both write to HC)
-Both records get distributed, their per-bucket values sum in `hcBuckets`, and `insertOrUpdate` takes `MAX(existing, new)`. The MAX upsert prevents double-counting across ticks.
+### Multiple HC data origins for the same time range (e.g. Samsung Health + Google Fit)
+`processHcRecords` groups by `dataOrigin`, runs subtract-and-fill for each source independently, then takes MAX across sources per bucket. Different data origins are independent measurements of the same physical steps — MAX prevents double-counting.
 
 ### HC record arrives for a bucket already consumed by `getTrackedSteps(deleteAfterRead=true)`
 The bucket was already deleted. `insertOrUpdate` creates a new row. The consumer app would see this as a late-arriving correction on the next read. This is a pre-existing limitation unrelated to this change.
@@ -532,51 +743,169 @@ Currently ignored, same as before. If a record is deleted from HC (e.g. user man
 
 ## What This Looks Like After the Fix
 
-Same scenario — 2 minutes of walking with watch, phone on desk. Assume Samsung Health wrote records in ~1-minute intervals:
+### Scenario A: Phone on desk, watch only
+
+2 minutes of walking with watch, phone on desk. Samsung Health wrote records in ~1-minute intervals:
 
 ```
 T=0:00  Service starts.
-T=0:30  phoneDelta=0, no HC changes
-T=1:00  phoneDelta=0, no HC changes
-T=1:30  phoneDelta=0, no HC changes
-T=2:00  phoneDelta=0, no HC changes
+T=0:30  phoneDelta=0 → bucket[0:00] = 0
+T=1:00  phoneDelta=0 → bucket[0:30] = 0
+T=1:30  phoneDelta=0 → bucket[1:00] = 0
+T=2:00  phoneDelta=0 → bucket[1:30] = 0
         ↕ Watch syncs. HC now has StepsRecord entries with original timestamps.
 T=2:30  phoneDelta=0, collectHcRecords() finds:
           StepsRecord(0:00–1:00, count=60)
-            → distributed: bucket[0:00]=30, bucket[0:30]=30
+            phone total for [0:00–1:00] = 0, surplus = 60
+            zero-step buckets: [0:00], [0:30] → 30 each
           StepsRecord(1:00–2:00, count=55)
-            → distributed: bucket[1:00]=27, bucket[1:30]=28
-        All 4 past buckets get their proportional share.
+            phone total for [1:00–2:00] = 0, surplus = 55
+            zero-step buckets: [1:00], [1:30] → 27, 28
         hc_metadata stored on each affected bucket row.
+
+Result: (30, 30, 27, 28) = 115 total
 ```
 
 **Before (current):** 115 steps crammed into bucket [2:00, 2:30].
-**After (proposed):** 115 steps distributed across buckets [0:00]–[2:00] proportionally, with raw HC records stored for diagnostics.
+**After (proposed):** 115 steps distributed across buckets [0:00]–[2:00], with raw HC records stored for diagnostics.
 
-The proportional distribution is an approximation (we assume even pacing within each StepsRecord), but it's a dramatically better approximation than "all steps in one bucket."
+### Scenario B: Phone in pocket for first minute, then on desk
+
+```
+T=0:30  phoneDelta=10 → bucket[0:00] = 10
+T=1:00  phoneDelta=10 → bucket[0:30] = 10
+T=1:30  phoneDelta=0  → bucket[1:00] = 0   ← phone put on desk
+T=2:00  phoneDelta=0  → bucket[1:30] = 0
+        ↕ Watch syncs: StepsRecord(0:00–2:00, count=120)
+T=2:30  phone total for [0:00–2:00] = 20, surplus = 100
+        zero-step buckets: [1:00], [1:30] → 50 each
+
+Result: (10, 10, 50, 50) = 120 total
+```
+
+Phone data preserved exactly. Watch surplus fills the gaps where the phone had no readings.
+
+### Scenario C: Phone active the whole time, watch counted more
+
+```
+T=0:30  phoneDelta=10 → bucket[0:00] = 10
+T=1:00  phoneDelta=10 → bucket[0:30] = 10
+T=1:30  phoneDelta=10 → bucket[1:00] = 10
+T=2:00  phoneDelta=1  → bucket[1:30] = 1    ← user set phone down, started jogging
+        ↕ Watch syncs: StepsRecord(0:00–2:00, count=130)
+T=2:30  phone total for [0:00–2:00] = 31, surplus = 99
+        zero-step buckets: NONE
+        Edge case: SUM surplus into last bucket: 1 + 99 = 100
+
+Result: (10, 10, 10, 100) = 130 total
+```
+
+The last bucket absorbs the surplus. Temporally imperfect for that bucket, but the phone data for the first three buckets is preserved exactly, and the total is correct.
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
 | `StepCounterService.kt` | Replace `recordHcInterval()` with `collectHcRecords()`. Remove `lastHcTotal`, `getHcTotalSteps()`, `trackingStartTime`. Rewrite `onTimerTick()` to distribute HC records and store metadata. |
-| `StepTrackingLogic.kt` | Add `distributeRecordIntoBuckets()` and `serializeHcRecords()`. |
+| `StepTrackingLogic.kt` | Add `subtractAndFill()`, `processHcRecords()`, and `serializeHcRecords()`. |
 | `StepSensorDatabase.kt` | Bump `DATABASE_VERSION` to 2. Add `hc_metadata` column in `onUpgrade`. Update `insertOrUpdate` signature. Update `StepBucket` data class. Update `getStepsSince` to read the new column. |
 | `StepSensorPlugin.kt` | Include `hcMetadata` in `getTrackedSteps` response. |
-| `StepTrackingLogicTest.kt` | Add tests for `distributeRecordIntoBuckets()`. |
+| `StepTrackingLogicTest.kt` | Add tests for `subtractAndFill()` and `processHcRecords()`. |
 | `StepSensorDatabaseTest.kt` | Add tests for `insertOrUpdate` with `hcMetadata` parameter. |
 | `src/definitions.ts` | Add `hcMetadata` field to TypeScript interface. |
 
-## Testing the Distribution Function
+## Testing the Subtract-and-Fill Function
 
-`distributeRecordIntoBuckets` is a pure function (Instant in, Map out) — fully testable with plain JUnit, no Robolectric or mocks needed. Example test cases:
+`subtractAndFill` is a pure function (Instants + counts + existing bucket map in, Map out) — fully testable with plain JUnit, no Robolectric or mocks needed. Example test cases:
 
-- Record exactly aligned to one 30s bucket → all steps in that bucket
-- Record spanning 4 buckets evenly → ~25% per bucket
-- Record with 1 step spanning 3 buckets → 1 step in the last bucket (rounding)
-- Record with count=0 → empty map
-- Record where startTime == endTime → empty map
-- Record starting mid-bucket → first bucket gets proportional share
-- 10-minute record → 20 buckets, verify sum equals original count
+- Phone on desk (all zero buckets): surplus distributed evenly across all buckets
+- Phone active then desk (mixed zero/non-zero): surplus fills only zero buckets, phone data untouched
+- Phone counted everything (no zeros, phone == HC): surplus is 0, empty result
+- Phone counted more than watch (phone > HC): surplus clamped to 0, empty result
+- All buckets have phone data but watch > phone (edge case): surplus goes to last bucket as SUM
+- HC count=0 → empty map
+- HC record where startTime == endTime → empty map
+- Single 30s bucket, phone had 5, watch had 10 → no zeros, surplus=5 → last bucket becomes 5+5=10
+- 10-minute record with 20 buckets, phone had data in first 5: surplus fills remaining 15
 
-The HC-specific code (`collectHcRecords`) requires Health Connect mocks and is harder to unit test, but the distribution logic — which is where bugs would hide — is fully covered.
+`processHcRecords` can also be tested with plain JUnit by constructing StepsRecord objects with different `dataOrigin` values:
+
+- Two sources, same time range → MAX per bucket across sources
+- Single source, two adjacent records → each record processed independently
+- Mixed: one source for 0:00–1:00, another for 0:00–2:00 → MAX for overlapping range
+
+The HC-specific code (`collectHcRecords`) requires Health Connect mocks and is harder to unit test, but the subtract-and-fill logic — which is where bugs would hide — is fully covered.
+
+## Commitment Boundary Handling
+
+HC StepsRecords can overlap commitment window boundaries. A 5-minute watch sync arriving at the start of a commitment could credit pre-commitment steps, and one at the end could span past the deadline.
+
+### Policy: Full Inclusion
+
+Any overlapping HC record is fully credited (the entire `hcCount` is used, not proportionally reduced), but steps are only written to in-window buckets. This prioritizes never falsely denying steps that may have occurred during the commitment.
+
+### How It Works
+
+`subtractAndFill` accepts `commitmentStart` and `commitmentEnd` parameters:
+
+1. Enumerate all 30s buckets the HC record covers
+2. **Clamp to commitment window** — only keep buckets in `[commitmentStart, commitmentEnd)`
+3. Sum phone steps in those in-window buckets only
+4. Surplus = `max(0, hcCount - phoneTotal)` — using the **full** hcCount
+5. Distribute surplus into zero-step in-window buckets
+
+Pre-commitment and post-commitment buckets are never written to. The commitment window is loaded from persisted scheduler windows via `StepTrackingScheduler.loadPersistedWindows()` + `findActiveWindow()` at service startup.
+
+### Example: HC Record Spanning Commitment Start
+
+```
+Commitment: 10:00:00–12:00:00
+HC record:  09:58:00–10:02:00, count=120
+
+All covered buckets: [09:58:00, 09:58:30, 09:59:00, 09:59:30, 10:00:00, 10:00:30, 10:01:00, 10:01:30]
+In-window buckets:   [10:00:00, 10:00:30, 10:01:00, 10:01:30]  (4 buckets)
+
+Phone total for in-window buckets: 0
+Surplus: max(0, 120 - 0) = 120 (full inclusion)
+Distribute 120 into 4 zero buckets: 30 each
+```
+
+All 120 steps are credited even though the record started before the commitment.
+
+## Per-Bucket Cap
+
+To prevent physically impossible step values, each zero-step bucket receiving HC surplus is capped at `MAX_STEPS_PER_BUCKET = 90` steps per 30-second interval (equivalent to 180 steps/min, which covers fast running).
+
+### How It Works
+
+During surplus distribution in `subtractAndFill`:
+
+1. Calculate total capacity: `zeroBuckets.size * MAX_STEPS_PER_BUCKET`
+2. If surplus fits within capacity: distribute evenly (no bucket exceeds cap)
+3. If surplus exceeds capacity: fill each zero bucket to cap, overflow goes to the **last in-window bucket uncapped**
+
+The last-bucket overflow is intentional — correctness (not losing steps) takes priority over plausibility. The consuming app can inspect `hcMetadata` to determine if a bucket's value seems unreasonable.
+
+### Example: Cap Overflow
+
+```
+2 zero-step buckets, surplus = 200, cap = 90
+Total capacity: 2 × 90 = 180
+Each zero bucket gets: 90
+Leftover: 200 - 180 = 20
+Last in-window bucket gets: 90 + 20 = 110 (uncapped)
+```
+
+## Summary: Double-Counting Prevention
+
+There are three layers where the same physical steps could be counted twice:
+
+| Layer | Source A | Source B | Prevention |
+|-------|----------|----------|------------|
+| Phone sensor vs HC | Phone TYPE_STEP_COUNTER | Watch via Health Connect | **Subtract-and-fill**: HC surplus = hcCount - phoneTotal. Only the surplus (steps the phone didn't see) gets written. Phone data is never overwritten. |
+| HC source vs HC source | Samsung Health | Google Fit (or other) | `processHcRecords` groups by `dataOrigin`, MAX across sources per bucket |
+| Within a single tick | phoneDelta | hcCurrentBucket | Phone writes first; HC only adds surplus via subtract-and-fill |
+
+**Current code** only handles within-tick merging via `MAX(phoneDelta, hcDelta)`. Late-arriving HC data double-counts against phone data already in past buckets.
+
+**Proposed code** handles all three layers. The subtract-and-fill algorithm ensures HC data only adds steps the phone didn't already count. Phone sensor data is always preserved as-is since it has the best per-bucket temporal accuracy.

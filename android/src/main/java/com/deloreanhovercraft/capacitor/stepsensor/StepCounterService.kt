@@ -18,9 +18,7 @@ import android.util.Log
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.records.StepsRecord
-import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ChangesTokenRequest
-import androidx.health.connect.client.time.TimeRangeFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,8 +26,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.Instant
-import kotlin.math.max
 
 class StepCounterService : Service(), SensorEventListener {
 
@@ -75,8 +74,10 @@ class StepCounterService : Service(), SensorEventListener {
     // Health Connect state (guarded by hcMutex, accessed on IO dispatcher)
     private val hcMutex = Mutex()
     private var changesToken: String? = null
-    private var lastHcTotal: Long = -1
-    private var trackingStartTime: Instant? = null
+
+    // Commitment window boundaries (loaded on start from persisted scheduler windows)
+    private var commitmentStart: Instant? = null
+    private var commitmentEnd: Instant? = null
 
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -102,7 +103,19 @@ class StepCounterService : Service(), SensorEventListener {
         }
 
         isRunning = true
-        trackingStartTime = Instant.now()
+
+        // Load commitment window from persisted scheduler windows
+        val scheduler = StepTrackingScheduler(this)
+        val windows = scheduler.loadPersistedWindows()
+        val now = Instant.now()
+        val activeWindow = StepTrackingLogic.findActiveWindow(windows, now)
+        if (activeWindow != null) {
+            commitmentStart = activeWindow.startAt
+            commitmentEnd = activeWindow.endAt
+            Log.d(TAG, "Commitment window: ${activeWindow.startAt} to ${activeWindow.endAt}")
+        } else {
+            Log.w(TAG, "No active commitment window found, HC boundary clamping disabled")
+        }
 
         startPhoneSensor()
         startHealthConnectPoller()
@@ -235,9 +248,7 @@ class StepCounterService : Service(), SensorEventListener {
                     changesToken = healthConnectClient!!.getChangesToken(
                         ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
                     )
-                    // Get initial HC total as baseline
-                    lastHcTotal = getHcTotalSteps()
-                    Log.d(TAG, "Health Connect poller initialized, baseline total=$lastHcTotal")
+                    Log.d(TAG, "Health Connect poller initialized")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to initialize Health Connect poller", e)
                     healthConnectClient = null
@@ -246,72 +257,64 @@ class StepCounterService : Service(), SensorEventListener {
         }
     }
 
-    private suspend fun recordHcInterval(): Long {
-        val client = healthConnectClient ?: return 0
+    private suspend fun collectHcRecords(): List<HcStepRecord> {
+        val client = healthConnectClient ?: return emptyList()
 
         return hcMutex.withLock {
-            val token = changesToken ?: return@withLock 0L
+            val token = changesToken ?: return@withLock emptyList()
+            val records = mutableListOf<HcStepRecord>()
 
             try {
-                // Check if there are any changes
-                var hasChanges = false
                 var nextToken = token
 
                 do {
                     val response = client.getChanges(nextToken)
 
-                    // Handle expired token — re-initialize and skip this interval
                     if (response.changesTokenExpired) {
                         Log.w(TAG, "Health Connect changes token expired, re-initializing")
                         changesToken = client.getChangesToken(
                             ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
                         )
-                        lastHcTotal = getHcTotalSteps()
-                        return@withLock 0L
+                        return@withLock emptyList()
                     }
 
-                    if (response.changes.any { it is UpsertionChange }) {
-                        hasChanges = true
+                    for (change in response.changes) {
+                        if (change is UpsertionChange && change.record is StepsRecord) {
+                            val sr = change.record as StepsRecord
+                            records.add(
+                                HcStepRecord(
+                                    startTime = sr.startTime,
+                                    endTime = sr.endTime,
+                                    count = sr.count,
+                                    dataOrigin = sr.metadata.dataOrigin.packageName
+                                )
+                            )
+                        }
                     }
                     nextToken = response.nextChangesToken
                 } while (response.hasMore)
 
                 changesToken = nextToken
-
-                if (!hasChanges) return@withLock 0L
-
-                // Changes detected — get current total and compute delta
-                val currentTotal = getHcTotalSteps()
-                val delta = if (lastHcTotal >= 0) {
-                    max(0, currentTotal - lastHcTotal)
-                } else {
-                    0
-                }
-                lastHcTotal = currentTotal
-                delta
+                records
             } catch (e: Exception) {
-                Log.e(TAG, "Error polling Health Connect", e)
-                0L
+                Log.e(TAG, "Error collecting Health Connect records", e)
+                emptyList()
             }
         }
     }
 
-    private suspend fun getHcTotalSteps(): Long {
-        val client = healthConnectClient ?: return 0
-        val startTime = trackingStartTime ?: return 0
-
-        return try {
-            val response = client.aggregate(
-                AggregateRequest(
-                    metrics = setOf(StepsRecord.COUNT_TOTAL),
-                    timeRangeFilter = TimeRangeFilter.between(startTime, Instant.now())
-                )
-            )
-            response[StepsRecord.COUNT_TOTAL] ?: 0
-        } catch (e: Exception) {
-            Log.e(TAG, "Error aggregating Health Connect steps", e)
-            0
+    private fun serializeHcRecords(records: List<HcStepRecord>): String {
+        val jsonArray = JSONArray()
+        for (record in records) {
+            val obj = JSONObject().apply {
+                put("startTime", record.startTime.toString())
+                put("endTime", record.endTime.toString())
+                put("count", record.count)
+                put("dataOrigin", record.dataOrigin)
+            }
+            jsonArray.put(obj)
         }
+        return jsonArray.toString()
     }
 
     // --- Timer & Merge Logic ---
@@ -328,16 +331,51 @@ class StepCounterService : Service(), SensorEventListener {
         val phoneDelta = recordPhoneSensorInterval()
 
         scope.launch {
-            val hcDelta = recordHcInterval()
-            val steps = StepTrackingLogic.mergeStepSources(phoneDelta, hcDelta)
-
             val now = Instant.now()
-            val (bucketStart, bucketEnd) = StepTrackingLogic.computeBucketBoundaries(now)
+            val (currentBucketStart, currentBucketEnd) = StepTrackingLogic.computeBucketBoundaries(now)
 
-            if (steps > 0) {
-                database.insertOrUpdate(bucketStart, bucketEnd, steps)
-                Log.d(TAG, "Recorded $steps steps (phone=$phoneDelta, hc=$hcDelta) for bucket $bucketStart")
+            // Always write phone data first — it's real-time and per-bucket accurate
+            if (phoneDelta > 0) {
+                database.insertOrUpdate(currentBucketStart, currentBucketEnd, phoneDelta.toInt())
+                Log.d(TAG, "Recorded $phoneDelta phone steps for bucket $currentBucketStart")
             }
+
+            val hcRecords = collectHcRecords()
+            if (hcRecords.isEmpty()) return@launch
+
+            val cStart = commitmentStart
+            val cEnd = commitmentEnd
+            if (cStart == null || cEnd == null) {
+                Log.w(TAG, "No commitment window, skipping HC record processing")
+                return@launch
+            }
+
+            val hcRecordsJson = serializeHcRecords(hcRecords)
+
+            // Determine the time range covered by HC records
+            val hcStart = hcRecords.minOf { it.startTime }
+            val hcEnd = hcRecords.maxOf { it.endTime }
+
+            // Read existing bucket data from DB for the covered range
+            val existingRows = database.getStepsSince(hcStart)
+            val existingBuckets = existingRows
+                .filter { Instant.parse(it.bucketStart).isBefore(hcEnd) }
+                .associate { Instant.parse(it.bucketStart) to it.steps }
+
+            // Subtract-and-fill with commitment boundary clamping and per-bucket cap
+            val filledBuckets = StepTrackingLogic.processHcRecords(
+                hcRecords, existingBuckets, cStart, cEnd
+            )
+
+            // Write filled values to DB
+            for ((bucketStart, steps) in filledBuckets) {
+                if (steps > 0) {
+                    val bucketEnd = bucketStart.plusSeconds(30)
+                    database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
+                }
+            }
+
+            Log.d(TAG, "Processed ${hcRecords.size} HC records, filled ${filledBuckets.size} buckets")
         }
     }
 }
