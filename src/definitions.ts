@@ -61,6 +61,11 @@ export interface GetTrackedStepsResult {
   syncToken: string;
 }
 
+export interface ExactAlarmPermissionResult {
+  /** Whether the app can schedule exact alarms. Always true on Android < 12 and on web/iOS. */
+  granted: boolean;
+}
+
 export interface StepSensorPlugin {
   /**
    * Schedule the foreground service to start and stop at specific times.
@@ -115,4 +120,20 @@ export interface StepSensorPlugin {
    * If omitted, deletes all data.
    */
   clearData(options?: ClearDataOptions): Promise<void>;
+
+  /**
+   * Check whether the app has permission to schedule exact alarms.
+   * On Android 12+ (API 31+), SCHEDULE_EXACT_ALARM requires explicit user grant.
+   * Returns { granted: true } on Android < 12, iOS, and web.
+   */
+  checkExactAlarmPermission(): Promise<ExactAlarmPermissionResult>;
+
+  /**
+   * Open the system settings screen where the user can grant exact alarm permission.
+   * On Android 12+, opens Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM.
+   * Resolves immediately with { granted: false } — the caller should re-check
+   * permission after the user returns to the app (e.g. on app resume).
+   * Returns { granted: true } on Android < 12, iOS, and web (no action needed).
+   */
+  requestExactAlarmPermission(): Promise<ExactAlarmPermissionResult>;
 }

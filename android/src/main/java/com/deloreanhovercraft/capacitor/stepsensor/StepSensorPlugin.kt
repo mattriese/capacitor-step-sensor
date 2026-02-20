@@ -1,8 +1,12 @@
 package com.deloreanhovercraft.capacitor.stepsensor
 
 import android.Manifest
+import android.app.AlarmManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.health.connect.client.HealthConnectClient
@@ -293,6 +297,48 @@ class StepSensorPlugin : Plugin() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear data", e)
             call.reject("Failed to clear data: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun checkExactAlarmPermission(call: PluginCall) {
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            alarmManager.canScheduleExactAlarms()
+        } else {
+            true // Pre-Android 12: exact alarms always allowed
+        }
+
+        val result = JSObject().apply { put("granted", granted) }
+        call.resolve(result)
+    }
+
+    @PluginMethod
+    fun requestExactAlarmPermission(call: PluginCall) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (alarmManager.canScheduleExactAlarms()) {
+                val result = JSObject().apply { put("granted", true) }
+                call.resolve(result)
+                return
+            }
+
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+                // Resolve immediately — the app can re-check after the user returns
+                val result = JSObject().apply { put("granted", false) }
+                call.resolve(result)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to open exact alarm settings", e)
+                call.reject("Failed to open exact alarm settings: ${e.message}")
+            }
+        } else {
+            // Pre-Android 12: exact alarms always allowed
+            val result = JSObject().apply { put("granted", true) }
+            call.resolve(result)
         }
     }
 
