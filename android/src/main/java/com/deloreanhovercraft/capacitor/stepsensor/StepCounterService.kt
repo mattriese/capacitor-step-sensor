@@ -26,6 +26,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.Duration
 import java.time.Instant
 
 class StepCounterService : Service(), SensorEventListener {
@@ -191,10 +192,11 @@ class StepCounterService : Service(), SensorEventListener {
         stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
 
         if (stepSensor != null) {
-            sensorManager?.registerListener(this, stepSensor, SensorManager.SENSOR_DELAY_NORMAL)
-            Log.d(TAG, "Phone step sensor registered")
+            val registered = sensorManager?.registerListener(this, stepSensor, SensorManager.SENSOR_DELAY_NORMAL)
+            Log.d(TAG, "Phone step sensor registered=$registered | sensor=${stepSensor?.name} | vendor=${stepSensor?.vendor}")
         } else {
-            Log.w(TAG, "TYPE_STEP_COUNTER sensor not available on this device")
+            val allSensors = sensorManager?.getSensorList(Sensor.TYPE_ALL)?.map { "${it.type}:${it.name}" }
+            Log.w(TAG, "TYPE_STEP_COUNTER sensor not available | allSensorTypes=${allSensors?.take(20)}")
         }
     }
 
@@ -204,9 +206,17 @@ class StepCounterService : Service(), SensorEventListener {
         stepSensor = null
     }
 
+    private var sensorEventCount = 0L
+
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_STEP_COUNTER) {
+            val prev = latestSensorValue
             latestSensorValue = event.values[0].toLong()
+            sensorEventCount++
+            // Log every 10th event to avoid spam
+            if (sensorEventCount % 10 == 1L) {
+                Log.d(TAG, "SENSOR_EVENT #$sensorEventCount | prev=$prev | new=$latestSensorValue | delta=${latestSensorValue - if (prev >= 0) prev else latestSensorValue}")
+            }
         }
     }
 
@@ -256,10 +266,18 @@ class StepCounterService : Service(), SensorEventListener {
     }
 
     private suspend fun collectHcRecords(): List<HcStepRecord> {
-        val client = healthConnectClient ?: return emptyList()
+        if (healthConnectClient == null) {
+            Log.d(TAG, "collectHcRecords: healthConnectClient is null, returning empty")
+            return emptyList()
+        }
+        val client = healthConnectClient!!
 
         return hcMutex.withLock {
-            val token = changesToken ?: return@withLock emptyList()
+            if (changesToken == null) {
+                Log.d(TAG, "collectHcRecords: changesToken is null, returning empty")
+                return@withLock emptyList()
+            }
+            val token = changesToken!!
             val records = mutableListOf<HcStepRecord>()
 
             try {
@@ -311,7 +329,10 @@ class StepCounterService : Service(), SensorEventListener {
         handler.removeCallbacks(timerRunnable)
     }
 
+    private var tickCount = 0L
+
     private fun onTimerTick() {
+        tickCount++
         val phoneDelta = recordPhoneSensorInterval()
 
         scope.launch {
@@ -321,10 +342,25 @@ class StepCounterService : Service(), SensorEventListener {
             // Always write phone data first — it's real-time and per-bucket accurate
             if (phoneDelta > 0) {
                 database.insertOrUpdate(currentBucketStart, currentBucketEnd, phoneDelta.toInt())
-                Log.d(TAG, "Recorded $phoneDelta phone steps for bucket $currentBucketStart")
             }
 
             val hcRecords = collectHcRecords()
+
+            // Log every tick so we can verify the service is alive and see what's happening
+            Log.d(TAG, "TICK #$tickCount | now=$now | phoneDelta=$phoneDelta" +
+                " | latestSensor=$latestSensorValue | lastBaseline=$lastSensorCount" +
+                " | hcRecords=${hcRecords.size}" +
+                " | hcClientNull=${healthConnectClient == null}" +
+                " | changesTokenNull=${changesToken == null}")
+
+            if (hcRecords.isNotEmpty()) {
+                for (rec in hcRecords) {
+                    Log.d(TAG, "  HC_RECORD | start=${rec.startTime} | end=${rec.endTime}" +
+                        " | count=${rec.count} | origin=${rec.dataOrigin}" +
+                        " | spanSeconds=${Duration.between(rec.startTime, rec.endTime).seconds}")
+                }
+            }
+
             if (hcRecords.isEmpty()) return@launch
 
             val cStart = commitmentStart
@@ -351,6 +387,12 @@ class StepCounterService : Service(), SensorEventListener {
                 hcRecords, existingBuckets, cStart, cEnd
             )
 
+            Log.d(TAG, "FILL | existingBuckets=${existingBuckets.size}" +
+                " | existingTotal=${existingBuckets.values.sum()}" +
+                " | filledBuckets=${filledBuckets.size}" +
+                " | filledTotal=${filledBuckets.values.sum()}" +
+                " | commitmentStart=$cStart | commitmentEnd=$cEnd")
+
             // Write filled values to DB
             for ((bucketStart, steps) in filledBuckets) {
                 if (steps > 0) {
@@ -358,8 +400,6 @@ class StepCounterService : Service(), SensorEventListener {
                     database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
                 }
             }
-
-            Log.d(TAG, "Processed ${hcRecords.size} HC records, filled ${filledBuckets.size} buckets")
         }
     }
 }

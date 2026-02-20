@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.time.Duration
 import java.time.Instant
 
 @CapacitorPlugin(
@@ -231,6 +232,15 @@ class StepSensorPlugin : Plugin() {
                         )
                     }
 
+                    Log.d(TAG, "BACKFILL_READ | window=${window.startAt}–${window.endAt}" +
+                        " | hcRecordsCount=${hcRecords.size}")
+                    for (rec in hcRecords) {
+                        val spanSeconds = Duration.between(rec.startTime, rec.endTime).seconds
+                        Log.d(TAG, "  BACKFILL_HC_RECORD | start=${rec.startTime}" +
+                            " | end=${rec.endTime} | count=${rec.count}" +
+                            " | origin=${rec.dataOrigin} | spanSeconds=$spanSeconds")
+                    }
+
                     if (hcRecords.isEmpty()) continue
 
                     val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
@@ -245,15 +255,17 @@ class StepSensorPlugin : Plugin() {
                         hcRecords, existingBuckets, window.startAt, window.endAt
                     )
 
+                    Log.d(TAG, "BACKFILL_FILL | existingBuckets=${existingBuckets.size}" +
+                        " | existingTotal=${existingBuckets.values.sum()}" +
+                        " | filledBuckets=${filledBuckets.size}" +
+                        " | filledTotal=${filledBuckets.values.sum()}")
+
                     for ((bucketStart, steps) in filledBuckets) {
                         if (steps > 0) {
                             val bucketEnd = bucketStart.plusSeconds(30)
                             database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
                         }
                     }
-
-                    Log.d(TAG, "Backfilled window ${window.startAt}–${window.endAt}: " +
-                        "${hcRecords.size} HC records, ${filledBuckets.size} buckets filled")
                 }
 
                 val result = JSObject().apply { put("backedUp", true) }
