@@ -136,7 +136,8 @@ object StepTrackingLogic {
         existingBuckets: Map<Instant, Int>,
         commitmentStart: Instant,
         commitmentEnd: Instant,
-        perBucketCap: Int = MAX_STEPS_PER_BUCKET
+        perBucketCap: Int = MAX_STEPS_PER_BUCKET,
+        now: Instant = Instant.now()
     ): Map<Instant, Int> {
         if (hcCount <= 0 || !recordEnd.isAfter(recordStart)) return emptyMap()
 
@@ -149,9 +150,10 @@ object StepTrackingLogic {
         }
         if (allBuckets.isEmpty()) return emptyMap()
 
-        // Clamp to commitment window — only keep buckets in [commitmentStart, commitmentEnd)
+        // Clamp to commitment window AND exclude future buckets
+        // Only keep buckets in [commitmentStart, min(commitmentEnd, now))
         val inWindowBuckets = allBuckets.filter { bucket ->
-            !bucket.isBefore(commitmentStart) && bucket.isBefore(commitmentEnd)
+            !bucket.isBefore(commitmentStart) && bucket.isBefore(commitmentEnd) && bucket.isBefore(now)
         }
         if (inWindowBuckets.isEmpty()) return emptyMap()
 
@@ -207,7 +209,8 @@ object StepTrackingLogic {
         existingBuckets: Map<Instant, Int>,
         commitmentStart: Instant,
         commitmentEnd: Instant,
-        perBucketCap: Int = MAX_STEPS_PER_BUCKET
+        perBucketCap: Int = MAX_STEPS_PER_BUCKET,
+        now: Instant = Instant.now()
     ): Map<Instant, Int> {
         if (records.isEmpty()) return emptyMap()
 
@@ -219,7 +222,7 @@ object StepTrackingLogic {
             for (record in sourceRecords) {
                 val filled = subtractAndFill(
                     record.startTime, record.endTime, record.count,
-                    existingBuckets, commitmentStart, commitmentEnd, perBucketCap
+                    existingBuckets, commitmentStart, commitmentEnd, perBucketCap, now
                 )
                 for ((bucketStart, steps) in filled) {
                     sourceBuckets[bucketStart] = max(sourceBuckets[bucketStart] ?: 0, steps)

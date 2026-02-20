@@ -366,6 +366,8 @@ class StepTrackingLogicTest {
     // Helper to create commitment window covering a large range (no boundary clamping)
     private val wideCommitmentStart = Instant.parse("2026-01-15T00:00:00Z")
     private val wideCommitmentEnd = Instant.parse("2026-01-16T00:00:00Z")
+    // A "now" well after all test data, so now-clamping doesn't affect existing tests
+    private val farFutureNow = Instant.parse("2026-01-16T12:00:00Z")
 
     @Test
     fun `subtractAndFill - phone on desk (all zeros) distributes evenly`() {
@@ -378,7 +380,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
-            120, existing, wideCommitmentStart, wideCommitmentEnd
+            120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(4, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -398,7 +400,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
-            120, existing, wideCommitmentStart, wideCommitmentEnd
+            120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         // surplus = 120 - 20 = 100, distributed into 2 zero buckets
         assertEquals(2, result.size)
@@ -417,7 +419,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
-            120, existing, wideCommitmentStart, wideCommitmentEnd
+            120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -433,7 +435,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
-            120, existing, wideCommitmentStart, wideCommitmentEnd
+            120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -449,7 +451,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
-            130, existing, wideCommitmentStart, wideCommitmentEnd
+            130, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         // surplus = 130 - 31 = 99, no zero buckets → last bucket gets existing + surplus
         assertEquals(1, result.size)
@@ -462,7 +464,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:00:30Z"),
-            0, existing, wideCommitmentStart, wideCommitmentEnd
+            0, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -471,7 +473,7 @@ class StepTrackingLogicTest {
     fun `subtractAndFill - start equals end returns empty`() {
         val t = Instant.parse("2026-01-15T10:00:00Z")
         val result = StepTrackingLogic.subtractAndFill(
-            t, t, 100, emptyMap(), wideCommitmentStart, wideCommitmentEnd
+            t, t, 100, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -482,7 +484,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:00:30Z"),
-            10, existing, wideCommitmentStart, wideCommitmentEnd
+            10, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         // surplus = 10 - 5 = 5, no zero buckets → last (only) bucket gets 5 + 5 = 10
         assertEquals(1, result.size)
@@ -500,7 +502,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
-            160, existing, wideCommitmentStart, wideCommitmentEnd
+            160, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(80, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(80, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -516,7 +518,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
-            200, existing, wideCommitmentStart, wideCommitmentEnd
+            200, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         // Each zero bucket gets 90, leftover 20 to last in-window bucket (which is 10:00:30)
         assertEquals(90, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -538,7 +540,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T09:59:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
-            120, existing, commitStart, commitEnd
+            120, existing, commitStart, commitEnd, now = farFutureNow
         )
         // Full inclusion: all 120 steps credited, only 2 in-window buckets
         assertEquals(2, result.size)
@@ -563,7 +565,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T11:59:00Z"),
             Instant.parse("2026-01-15T12:01:00Z"),
-            100, existing, commitStart, commitEnd
+            100, existing, commitStart, commitEnd, now = farFutureNow
         )
         assertEquals(2, result.size)
         assertEquals(50, result[Instant.parse("2026-01-15T11:59:00Z")])
@@ -582,7 +584,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T08:00:00Z"),
             Instant.parse("2026-01-15T08:01:00Z"),
-            100, existing, commitStart, commitEnd
+            100, existing, commitStart, commitEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -598,7 +600,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:30Z"),
-            10, existing, wideCommitmentStart, wideCommitmentEnd
+            10, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(3, result.size)
         // 10 / 3 = 3 remainder 1 → first bucket gets 4
@@ -613,11 +615,76 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
-            60, emptyMap(), wideCommitmentStart, wideCommitmentEnd
+            60, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(2, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
+    }
+
+    @Test
+    fun `subtractAndFill - now-clamping excludes future buckets`() {
+        // HC record spans 10:00–10:02 (4 buckets), but now is 10:01:00
+        // Only buckets at 10:00:00 and 10:00:30 should be filled (before now)
+        val now = Instant.parse("2026-01-15T10:01:00Z")
+        val result = StepTrackingLogic.subtractAndFill(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:02:00Z"),
+            120, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
+        )
+        assertEquals(2, result.size)
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:30Z")])
+        // Future buckets are not included
+        assertNull(result[Instant.parse("2026-01-15T10:01:00Z")])
+        assertNull(result[Instant.parse("2026-01-15T10:01:30Z")])
+    }
+
+    @Test
+    fun `subtractAndFill - now exactly at record start returns empty`() {
+        // If now == recordStart, all buckets are in the future
+        val now = Instant.parse("2026-01-15T10:00:00Z")
+        val result = StepTrackingLogic.subtractAndFill(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:02:00Z"),
+            120, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `subtractAndFill - now mid-bucket only includes past buckets`() {
+        // now is at 10:00:45, so floor = 10:00:30
+        // Bucket 10:00:00 is before now, bucket 10:00:30 is NOT before now (equals)
+        val now = Instant.parse("2026-01-15T10:00:30Z")
+        val result = StepTrackingLogic.subtractAndFill(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            60, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
+        )
+        // Only the 10:00:00 bucket qualifies (isBefore(10:00:30))
+        assertEquals(1, result.size)
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
+    }
+
+    @Test
+    fun `processHcRecords - now-clamping applies through processHcRecords`() {
+        val now = Instant.parse("2026-01-15T10:01:00Z")
+        val records = listOf(
+            HcStepRecord(
+                Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:02:00Z"),
+                120, "com.sec.android.app.shealth"
+            )
+        )
+        val result = StepTrackingLogic.processHcRecords(
+            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
+        )
+        // Only 2 buckets (10:00:00 and 10:00:30) should get steps
+        assertEquals(2, result.size)
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertNull(result[Instant.parse("2026-01-15T10:01:00Z")])
     }
 
     // --- processHcRecords ---
@@ -626,7 +693,7 @@ class StepTrackingLogicTest {
     fun `processHcRecords - empty records returns empty`() {
         val result = StepTrackingLogic.processHcRecords(
             emptyList(), emptyMap(),
-            wideCommitmentStart, wideCommitmentEnd
+            wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertTrue(result.isEmpty())
     }
@@ -641,7 +708,7 @@ class StepTrackingLogicTest {
             )
         )
         val result = StepTrackingLogic.processHcRecords(
-            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd
+            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -662,7 +729,7 @@ class StepTrackingLogicTest {
             )
         )
         val result = StepTrackingLogic.processHcRecords(
-            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd
+            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(1, result.size)
         assertEquals(50, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -683,7 +750,7 @@ class StepTrackingLogicTest {
             )
         )
         val result = StepTrackingLogic.processHcRecords(
-            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd
+            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
         assertEquals(4, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])

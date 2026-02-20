@@ -384,7 +384,7 @@ class StepCounterService : Service(), SensorEventListener {
 
             // Subtract-and-fill with commitment boundary clamping and per-bucket cap
             val filledBuckets = StepTrackingLogic.processHcRecords(
-                hcRecords, existingBuckets, cStart, cEnd
+                hcRecords, existingBuckets, cStart, cEnd, now = now
             )
 
             Log.d(TAG, "FILL | existingBuckets=${existingBuckets.size}" +

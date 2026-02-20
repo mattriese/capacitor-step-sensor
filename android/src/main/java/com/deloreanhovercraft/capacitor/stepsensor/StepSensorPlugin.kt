@@ -252,7 +252,8 @@ class StepSensorPlugin : Plugin() {
                         .associate { Instant.parse(it.bucketStart) to it.steps }
 
                     val filledBuckets = StepTrackingLogic.processHcRecords(
-                        hcRecords, existingBuckets, window.startAt, window.endAt
+                        hcRecords, existingBuckets, window.startAt, window.endAt,
+                        now = Instant.now()
                     )
 
                     Log.d(TAG, "BACKFILL_FILL | existingBuckets=${existingBuckets.size}" +
