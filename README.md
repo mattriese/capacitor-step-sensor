@@ -224,6 +224,8 @@ See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm de
 * [`getTrackedSteps(...)`](#gettrackedsteps)
 * [`backfillFromHealthConnect(...)`](#backfillfromhealthconnect)
 * [`clearData(...)`](#cleardata)
+* [`checkExactAlarmPermission()`](#checkexactalarmpermission)
+* [`requestExactAlarmPermission()`](#requestexactalarmpermission)
 * [Interfaces](#interfaces)
 
 </docgen-index>
@@ -345,6 +347,38 @@ If omitted, deletes all data.
 --------------------
 
 
+### checkExactAlarmPermission()
+
+```typescript
+checkExactAlarmPermission() => Promise<ExactAlarmPermissionResult>
+```
+
+Check whether the app has permission to schedule exact alarms.
+On Android 12+ (API 31+), SCHEDULE_EXACT_ALARM requires explicit user grant.
+Returns { granted: true } on Android &lt; 12, iOS, and web.
+
+**Returns:** <code>Promise&lt;<a href="#exactalarmpermissionresult">ExactAlarmPermissionResult</a>&gt;</code>
+
+--------------------
+
+
+### requestExactAlarmPermission()
+
+```typescript
+requestExactAlarmPermission() => Promise<ExactAlarmPermissionResult>
+```
+
+Open the system settings screen where the user can grant exact alarm permission.
+On Android 12+, opens Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM.
+Resolves immediately with { granted: false } — the caller should re-check
+permission after the user returns to the app (e.g. on app resume).
+Returns { granted: true } on Android &lt; 12, iOS, and web (no action needed).
+
+**Returns:** <code>Promise&lt;<a href="#exactalarmpermissionresult">ExactAlarmPermissionResult</a>&gt;</code>
+
+--------------------
+
+
 ### Interfaces
 
 
@@ -416,5 +450,12 @@ If omitted, deletes all data.
 | Prop         | Type                | Description                                                                                             |
 | ------------ | ------------------- | ------------------------------------------------------------------------------------------------------- |
 | **`before`** | <code>string</code> | ISO 8601 timestamp. Delete all buckets with bucketStart before this time. If omitted, deletes all data. |
+
+
+#### ExactAlarmPermissionResult
+
+| Prop          | Type                 | Description                                                                               |
+| ------------- | -------------------- | ----------------------------------------------------------------------------------------- |
+| **`granted`** | <code>boolean</code> | Whether the app can schedule exact alarms. Always true on Android &lt; 12 and on web/iOS. |
 
 </docgen-api>
