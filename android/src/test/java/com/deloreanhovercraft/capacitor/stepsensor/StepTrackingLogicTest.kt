@@ -672,7 +672,7 @@ class StepTrackingLogicTest {
         val now = Instant.parse("2026-01-15T10:01:00Z")
         val records = listOf(
             HcStepRecord(
-                Instant.parse("2026-01-15T10:00:00Z"),
+                "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:02:00Z"),
                 120, "com.sec.android.app.shealth"
             )
@@ -702,7 +702,7 @@ class StepTrackingLogicTest {
     fun `processHcRecords - single source distributes correctly`() {
         val records = listOf(
             HcStepRecord(
-                Instant.parse("2026-01-15T10:00:00Z"),
+                "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:01:00Z"),
                 60, "com.sec.android.app.shealth"
             )
@@ -718,12 +718,12 @@ class StepTrackingLogicTest {
     fun `processHcRecords - two sources takes MAX per bucket`() {
         val records = listOf(
             HcStepRecord(
-                Instant.parse("2026-01-15T10:00:00Z"),
+                "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:00:30Z"),
                 50, "com.sec.android.app.shealth"
             ),
             HcStepRecord(
-                Instant.parse("2026-01-15T10:00:00Z"),
+                "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:00:30Z"),
                 30, "com.google.android.apps.fitness"
             )
@@ -739,12 +739,12 @@ class StepTrackingLogicTest {
     fun `processHcRecords - adjacent records from same source`() {
         val records = listOf(
             HcStepRecord(
-                Instant.parse("2026-01-15T10:00:00Z"),
+                "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:01:00Z"),
                 60, "com.sec.android.app.shealth"
             ),
             HcStepRecord(
-                Instant.parse("2026-01-15T10:01:00Z"),
+                "", Instant.parse("2026-01-15T10:01:00Z"),
                 Instant.parse("2026-01-15T10:02:00Z"),
                 55, "com.sec.android.app.shealth"
             )
@@ -758,5 +758,238 @@ class StepTrackingLogicTest {
         // Second record: 55/2 = 27 remainder 1 → first gets 28
         assertEquals(28, result[Instant.parse("2026-01-15T10:01:00Z")])
         assertEquals(27, result[Instant.parse("2026-01-15T10:01:30Z")])
+    }
+
+    // --- computeProratedPhoneSteps ---
+
+    @Test
+    fun `computeProratedPhoneSteps - full bucket overlap`() {
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 60
+        )
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:00:30Z")
+        )
+        assertEquals(60.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - leading edge prorate`() {
+        // Range starts 15s into the bucket → 15/30 = 0.5 fraction
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 60
+        )
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T10:00:15Z"),
+            Instant.parse("2026-01-15T10:00:30Z")
+        )
+        assertEquals(30.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - trailing edge prorate`() {
+        // Range ends 15s into the bucket → 15/30 = 0.5 fraction
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 60
+        )
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:00:15Z")
+        )
+        assertEquals(30.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - both edges prorated`() {
+        // Range is 10:00:10 to 10:00:20 → 10/30 fraction
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 90
+        )
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T10:00:10Z"),
+            Instant.parse("2026-01-15T10:00:20Z")
+        )
+        assertEquals(30.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - multiple buckets with partial overlap`() {
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 30,
+            Instant.parse("2026-01-15T10:00:30Z") to 60,
+            Instant.parse("2026-01-15T10:01:00Z") to 90
+        )
+        // Range: 10:00:15 to 10:01:15
+        // Bucket 10:00:00: overlap 15s → 30 * 15/30 = 15
+        // Bucket 10:00:30: full overlap → 60
+        // Bucket 10:01:00: overlap 15s → 90 * 15/30 = 45
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T10:00:15Z"),
+            Instant.parse("2026-01-15T10:01:15Z")
+        )
+        assertEquals(120.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - empty range returns zero`() {
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 60
+        )
+        val t = Instant.parse("2026-01-15T10:00:00Z")
+        assertEquals(0.0, StepTrackingLogic.computeProratedPhoneSteps(buckets, t, t), 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - no overlap returns zero`() {
+        val buckets = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 60
+        )
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            buckets,
+            Instant.parse("2026-01-15T11:00:00Z"),
+            Instant.parse("2026-01-15T11:00:30Z")
+        )
+        assertEquals(0.0, result, 0.001)
+    }
+
+    @Test
+    fun `computeProratedPhoneSteps - empty buckets returns zero`() {
+        val result = StepTrackingLogic.computeProratedPhoneSteps(
+            emptyMap(),
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z")
+        )
+        assertEquals(0.0, result, 0.001)
+    }
+
+    // --- distributeWatchSurplus ---
+
+    @Test
+    fun `distributeWatchSurplus - even distribution into zero buckets`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 0,
+            Instant.parse("2026-01-15T10:00:30Z") to 0,
+            Instant.parse("2026-01-15T10:01:00Z") to 0,
+            Instant.parse("2026-01-15T10:01:30Z") to 0
+        )
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            120, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:02:00Z"),
+            now = farFutureNow
+        )
+        assertEquals(4, result.size)
+        assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertEquals(30, result[Instant.parse("2026-01-15T10:01:00Z")])
+        assertEquals(30, result[Instant.parse("2026-01-15T10:01:30Z")])
+    }
+
+    @Test
+    fun `distributeWatchSurplus - skips non-zero buckets`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 10,
+            Instant.parse("2026-01-15T10:00:30Z") to 0,
+            Instant.parse("2026-01-15T10:01:00Z") to 0
+        )
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            60, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:30Z"),
+            now = farFutureNow
+        )
+        assertEquals(2, result.size)
+        assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertEquals(30, result[Instant.parse("2026-01-15T10:01:00Z")])
+    }
+
+    @Test
+    fun `distributeWatchSurplus - cap enforcement`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 0,
+            Instant.parse("2026-01-15T10:00:30Z") to 0
+        )
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            200, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            now = farFutureNow
+        )
+        // 2 zero buckets, cap 90 each = 180 capacity, leftover 20 to last bucket
+        assertEquals(90, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(90 + 20, result[Instant.parse("2026-01-15T10:00:30Z")])
+    }
+
+    @Test
+    fun `distributeWatchSurplus - overflow to last bucket when no zeros`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 10,
+            Instant.parse("2026-01-15T10:00:30Z") to 5
+        )
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            50, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            now = farFutureNow
+        )
+        // No zero buckets → last bucket gets existing + surplus
+        assertEquals(1, result.size)
+        assertEquals(5 + 50, result[Instant.parse("2026-01-15T10:00:30Z")])
+    }
+
+    @Test
+    fun `distributeWatchSurplus - now-clamping excludes future buckets`() {
+        val now = Instant.parse("2026-01-15T10:01:00Z")
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            120, emptyMap(),
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:02:00Z"),
+            now = now
+        )
+        // Only 2 buckets before now: 10:00:00 and 10:00:30
+        assertEquals(2, result.size)
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(60, result[Instant.parse("2026-01-15T10:00:30Z")])
+    }
+
+    @Test
+    fun `distributeWatchSurplus - empty range returns empty`() {
+        val t = Instant.parse("2026-01-15T10:00:00Z")
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            100, emptyMap(), t, t, now = farFutureNow
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `distributeWatchSurplus - zero surplus returns empty`() {
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            0, emptyMap(),
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            now = farFutureNow
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `distributeWatchSurplus - remainder distribution`() {
+        // 3 zero buckets, surplus = 10 → 10/3 = 3 each, remainder 1 to first bucket
+        val result = StepTrackingLogic.distributeWatchSurplus(
+            10, emptyMap(),
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:30Z"),
+            now = farFutureNow
+        )
+        assertEquals(3, result.size)
+        assertEquals(4, result[Instant.parse("2026-01-15T10:00:00Z")])
+        assertEquals(3, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertEquals(3, result[Instant.parse("2026-01-15T10:01:00Z")])
     }
 }

@@ -225,6 +225,7 @@ class StepSensorPlugin : Plugin() {
 
                     val hcRecords = response.records.map { sr ->
                         HcStepRecord(
+                            recordId = sr.metadata.id,
                             startTime = sr.startTime,
                             endTime = sr.endTime,
                             count = sr.count,

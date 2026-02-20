@@ -2,10 +2,13 @@ package com.deloreanhovercraft.capacitor.stepsensor
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Duration
 import java.time.Instant
 import kotlin.math.max
+import kotlin.math.min
 
 data class HcStepRecord(
+    val recordId: String,
     val startTime: Instant,
     val endTime: Instant,
     val count: Long,
@@ -235,10 +238,94 @@ object StepTrackingLogic {
         return result
     }
 
+    /**
+     * Compute phone steps in [rangeStart, rangeEnd) with prorated edge buckets.
+     * Each bucket covers 30s starting at its key. If a bucket only partially
+     * overlaps the range, its steps are multiplied by the overlap fraction.
+     */
+    fun computeProratedPhoneSteps(
+        existingBuckets: Map<Instant, Int>,
+        rangeStart: Instant,
+        rangeEnd: Instant
+    ): Double {
+        if (!rangeEnd.isAfter(rangeStart)) return 0.0
+
+        var total = 0.0
+        for ((bucketStart, steps) in existingBuckets) {
+            val bucketEnd = bucketStart.plusSeconds(30)
+
+            // Skip buckets with no overlap
+            if (!bucketEnd.isAfter(rangeStart) || !rangeEnd.isAfter(bucketStart)) continue
+
+            val overlapStart = if (rangeStart.isAfter(bucketStart)) rangeStart else bucketStart
+            val overlapEnd = if (rangeEnd.isBefore(bucketEnd)) rangeEnd else bucketEnd
+            val overlapSeconds = Duration.between(overlapStart, overlapEnd).seconds.toDouble()
+            val fraction = overlapSeconds / 30.0
+            total += steps * fraction
+        }
+        return total
+    }
+
+    /**
+     * Distribute surplus steps into empty 30s buckets within [rangeStart, rangeEnd).
+     * Buckets are clamped to [floor(rangeStart), min(rangeEnd, now)).
+     * Zero-step buckets get even distribution with per-bucket cap; overflow to last bucket.
+     */
+    fun distributeWatchSurplus(
+        surplus: Long,
+        existingBuckets: Map<Instant, Int>,
+        rangeStart: Instant,
+        rangeEnd: Instant,
+        perBucketCap: Int = MAX_STEPS_PER_BUCKET,
+        now: Instant = Instant.now()
+    ): Map<Instant, Int> {
+        if (surplus <= 0 || !rangeEnd.isAfter(rangeStart)) return emptyMap()
+
+        val effectiveEnd = if (now.isBefore(rangeEnd)) now else rangeEnd
+
+        // Enumerate 30s buckets in [floor(rangeStart), effectiveEnd)
+        val buckets = mutableListOf<Instant>()
+        var cursor = floorTo30Seconds(rangeStart)
+        while (cursor.isBefore(effectiveEnd)) {
+            buckets.add(cursor)
+            cursor = cursor.plusSeconds(30)
+        }
+        if (buckets.isEmpty()) return emptyMap()
+
+        val zeroBuckets = buckets.filter { (existingBuckets[it] ?: 0) == 0 }
+        val result = mutableMapOf<Instant, Int>()
+
+        if (zeroBuckets.isNotEmpty()) {
+            val totalCapacity = zeroBuckets.size.toLong() * perBucketCap
+            if (surplus <= totalCapacity) {
+                val perBucket = (surplus / zeroBuckets.size).toInt()
+                val remainder = (surplus % zeroBuckets.size).toInt()
+                for ((i, bucket) in zeroBuckets.withIndex()) {
+                    result[bucket] = perBucket + if (i < remainder) 1 else 0
+                }
+            } else {
+                for (bucket in zeroBuckets) {
+                    result[bucket] = perBucketCap
+                }
+                val leftover = (surplus - totalCapacity).toInt()
+                val lastBucket = buckets.last()
+                val existing = existingBuckets[lastBucket] ?: 0
+                result[lastBucket] = (result[lastBucket] ?: existing) + leftover
+            }
+        } else {
+            val lastBucket = buckets.last()
+            val existing = existingBuckets[lastBucket] ?: 0
+            result[lastBucket] = existing + surplus.toInt()
+        }
+
+        return result
+    }
+
     fun serializeHcRecords(records: List<HcStepRecord>): String {
         val jsonArray = JSONArray()
         for (record in records) {
             val obj = JSONObject().apply {
+                put("recordId", record.recordId)
                 put("startTime", record.startTime.toString())
                 put("endTime", record.endTime.toString())
                 put("count", record.count)

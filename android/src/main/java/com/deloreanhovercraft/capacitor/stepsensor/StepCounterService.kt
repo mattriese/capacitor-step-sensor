@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Duration
 import java.time.Instant
+import kotlin.math.max
 
 class StepCounterService : Service(), SensorEventListener {
 
@@ -74,9 +75,8 @@ class StepCounterService : Service(), SensorEventListener {
     private val hcMutex = Mutex()
     private var changesToken: String? = null
 
-    // Commitment window boundaries (loaded on start from persisted scheduler windows)
-    private var commitmentStart: Instant? = null
-    private var commitmentEnd: Instant? = null
+    // HC delta tracking (in-memory, resets on service restart)
+    private val hcDeltaTracker = HcDeltaTracker()
 
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -102,19 +102,6 @@ class StepCounterService : Service(), SensorEventListener {
         }
 
         isRunning = true
-
-        // Load commitment window from persisted scheduler windows
-        val scheduler = StepTrackingScheduler(this)
-        val windows = scheduler.loadPersistedWindows()
-        val now = Instant.now()
-        val activeWindow = StepTrackingLogic.findActiveWindow(windows, now)
-        if (activeWindow != null) {
-            commitmentStart = activeWindow.startAt
-            commitmentEnd = activeWindow.endAt
-            Log.d(TAG, "Commitment window: ${activeWindow.startAt} to ${activeWindow.endAt}")
-        } else {
-            Log.w(TAG, "No active commitment window found, HC boundary clamping disabled")
-        }
 
         startPhoneSensor()
         startHealthConnectPoller()
@@ -299,6 +286,7 @@ class StepCounterService : Service(), SensorEventListener {
                             val sr = change.record as StepsRecord
                             records.add(
                                 HcStepRecord(
+                                    recordId = sr.metadata.id,
                                     startTime = sr.startTime,
                                     endTime = sr.endTime,
                                     count = sr.count,
@@ -363,43 +351,72 @@ class StepCounterService : Service(), SensorEventListener {
 
             if (hcRecords.isEmpty()) return@launch
 
-            val cStart = commitmentStart
-            val cEnd = commitmentEnd
-            if (cStart == null || cEnd == null) {
-                Log.w(TAG, "No commitment window, skipping HC record processing")
+            // --- HC Delta Tracking ---
+            val deltas = hcDeltaTracker.computeDeltas(hcRecords)
+
+            if (hcDeltaTracker.lastProcessTime == null) {
+                // First call: baselines just established, no deltas to process
+                Log.d(TAG, "HC_DELTA | Baseline established | records=${hcRecords.size}" +
+                    " | origins=${deltas.keys}")
+                hcDeltaTracker.markProcessed(now)
                 return@launch
             }
 
+            val totalDelta = deltas.values.sum()
+            if (totalDelta == 0L) {
+                Log.d(TAG, "HC_DELTA | No new steps | deltas=$deltas")
+                return@launch
+            }
+
+            val lastProcessTime = hcDeltaTracker.lastProcessTime!!
+            Log.d(TAG, "HC_DELTA | deltas=$deltas | range=[$lastProcessTime, $now)")
+
             val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
 
-            // Determine the time range covered by HC records
-            val hcStart = hcRecords.minOf { it.startTime }
-            val hcEnd = hcRecords.maxOf { it.endTime }
-
-            // Read existing bucket data from DB for the covered range
-            val existingRows = database.getStepsSince(hcStart)
+            // Read existing bucket data for [lastProcessTime, now)
+            val existingRows = database.getStepsSince(lastProcessTime)
             val existingBuckets = existingRows
-                .filter { Instant.parse(it.bucketStart).isBefore(hcEnd) }
+                .filter { Instant.parse(it.bucketStart).isBefore(now) }
                 .associate { Instant.parse(it.bucketStart) to it.steps }
 
-            // Subtract-and-fill with commitment boundary clamping and per-bucket cap
-            val filledBuckets = StepTrackingLogic.processHcRecords(
-                hcRecords, existingBuckets, cStart, cEnd, now = now
-            )
+            val allFilledBuckets = mutableMapOf<Instant, Int>()
 
-            Log.d(TAG, "FILL | existingBuckets=${existingBuckets.size}" +
+            for ((origin, delta) in deltas) {
+                if (delta <= 0) continue
+
+                val phoneTotalInRange = StepTrackingLogic.computeProratedPhoneSteps(
+                    existingBuckets, lastProcessTime, now
+                )
+                val watchSurplus = max(0L, delta - phoneTotalInRange.toLong())
+
+                Log.d(TAG, "HC_DELTA | origin=$origin | delta=$delta" +
+                    " | phoneInRange=${phoneTotalInRange.toLong()} | watchSurplus=$watchSurplus")
+
+                if (watchSurplus > 0) {
+                    val filled = StepTrackingLogic.distributeWatchSurplus(
+                        watchSurplus, existingBuckets, lastProcessTime, now, now = now
+                    )
+                    for ((bucketStart, steps) in filled) {
+                        allFilledBuckets[bucketStart] =
+                            max(allFilledBuckets[bucketStart] ?: 0, steps)
+                    }
+                }
+            }
+
+            Log.d(TAG, "HC_DELTA_FILL | existingBuckets=${existingBuckets.size}" +
                 " | existingTotal=${existingBuckets.values.sum()}" +
-                " | filledBuckets=${filledBuckets.size}" +
-                " | filledTotal=${filledBuckets.values.sum()}" +
-                " | commitmentStart=$cStart | commitmentEnd=$cEnd")
+                " | filledBuckets=${allFilledBuckets.size}" +
+                " | filledTotal=${allFilledBuckets.values.sum()}")
 
             // Write filled values to DB
-            for ((bucketStart, steps) in filledBuckets) {
+            for ((bucketStart, steps) in allFilledBuckets) {
                 if (steps > 0) {
                     val bucketEnd = bucketStart.plusSeconds(30)
                     database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
                 }
             }
+
+            hcDeltaTracker.markProcessed(now)
         }
     }
 }
