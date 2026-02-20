@@ -336,4 +336,163 @@ class StepSensorDatabaseTest {
         assertNull(results[0].hcMetadata)     // phone-only bucket
         assertEquals(meta, results[1].hcMetadata) // HC-enriched bucket
     }
+
+    // --- modified_at ---
+
+    @Test
+    fun `insert sets modifiedAt`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+        db.insertOrUpdate(start, end, 45)
+
+        val results = db.getStepsSince(null)
+        assertEquals(1, results.size)
+        assertNotNull(results[0].modifiedAt)
+        // modifiedAt should equal createdAt on first insert
+        assertEquals(results[0].createdAt, results[0].modifiedAt)
+    }
+
+    @Test
+    fun `MAX upsert updates modifiedAt when steps increase`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+
+        db.insertOrUpdate(start, end, 30)
+        val originalModifiedAt = db.getStepsSince(null)[0].modifiedAt
+
+        // Small delay to ensure timestamp changes
+        Thread.sleep(10)
+
+        db.insertOrUpdate(start, end, 45) // higher — should update modifiedAt
+        val updatedModifiedAt = db.getStepsSince(null)[0].modifiedAt
+
+        assertTrue(
+            "modifiedAt should advance when steps increase",
+            updatedModifiedAt > originalModifiedAt
+        )
+    }
+
+    @Test
+    fun `MAX upsert does NOT update modifiedAt when steps do not increase`() {
+        val start = Instant.parse("2026-01-15T10:02:00Z")
+        val end = Instant.parse("2026-01-15T10:02:30Z")
+
+        db.insertOrUpdate(start, end, 45)
+        val originalModifiedAt = db.getStepsSince(null)[0].modifiedAt
+
+        Thread.sleep(10)
+
+        db.insertOrUpdate(start, end, 10) // lower — no-op, modifiedAt unchanged
+        val afterLower = db.getStepsSince(null)[0].modifiedAt
+        assertEquals(originalModifiedAt, afterLower)
+
+        Thread.sleep(10)
+
+        db.insertOrUpdate(start, end, 45) // equal — no-op, modifiedAt unchanged
+        val afterEqual = db.getStepsSince(null)[0].modifiedAt
+        assertEquals(originalModifiedAt, afterEqual)
+    }
+
+    // --- modifiedSince ---
+
+    @Test
+    fun `modifiedSince returns only recently modified rows`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+
+        // Capture a syncToken after first insert
+        val syncToken = Instant.now()
+
+        Thread.sleep(10)
+
+        // Insert a second row after the token
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 20
+        )
+
+        val results = db.getStepsSince(null, modifiedSince = syncToken)
+        assertEquals(1, results.size)
+        assertEquals(20, results[0].steps)
+    }
+
+    @Test
+    fun `modifiedSince with no changes returns empty`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+
+        Thread.sleep(10)
+        val syncToken = Instant.now()
+
+        // No new inserts or updates after token
+        val results = db.getStepsSince(null, modifiedSince = syncToken)
+        assertEquals(0, results.size)
+    }
+
+    @Test
+    fun `modifiedSince detects backfill updates to old buckets`() {
+        // Simulate initial phone data
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:30Z"),
+            Instant.parse("2026-01-15T09:01:00Z"), 5
+        )
+
+        val syncToken = Instant.now()
+        Thread.sleep(10)
+
+        // Simulate backfill updating the first bucket (HC had more steps)
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 25
+        )
+
+        val results = db.getStepsSince(null, modifiedSince = syncToken)
+        // Only the updated bucket should appear
+        assertEquals(1, results.size)
+        assertEquals("2026-01-15T09:00:00Z", results[0].bucketStart)
+        assertEquals(25, results[0].steps)
+    }
+
+    @Test
+    fun `modifiedSince combined with since filters both dimensions`() {
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 10
+        )
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T12:00:00Z"),
+            Instant.parse("2026-01-15T12:00:30Z"), 20
+        )
+
+        val syncToken = Instant.now()
+        Thread.sleep(10)
+
+        // Update the early bucket
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T09:00:00Z"),
+            Instant.parse("2026-01-15T09:00:30Z"), 30
+        )
+        // Insert a new late bucket
+        db.insertOrUpdate(
+            Instant.parse("2026-01-15T15:00:00Z"),
+            Instant.parse("2026-01-15T15:00:30Z"), 40
+        )
+
+        // since=10:00 filters out 09:00 bucket, modifiedSince filters out 12:00 bucket
+        val results = db.getStepsSince(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            modifiedSince = syncToken
+        )
+        assertEquals(1, results.size)
+        assertEquals("2026-01-15T15:00:00Z", results[0].bucketStart)
+        assertEquals(40, results[0].steps)
+    }
 }

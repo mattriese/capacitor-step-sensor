@@ -17,8 +17,9 @@ export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
 
   async getTrackedSteps(): Promise<{
     steps: Array<{ bucketStart: string; bucketEnd: string; steps: number }>;
+    syncToken: string;
   }> {
-    return { steps: [] };
+    return { steps: [], syncToken: new Date().toISOString() };
   }
 
   async backfillFromHealthConnect(): Promise<BackfillResult> {

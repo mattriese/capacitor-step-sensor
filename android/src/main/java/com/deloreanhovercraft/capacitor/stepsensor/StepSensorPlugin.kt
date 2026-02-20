@@ -141,9 +141,14 @@ class StepSensorPlugin : Plugin() {
     fun getTrackedSteps(call: PluginCall) {
         try {
             val sinceStr = call.getString("since")
+            val modifiedSinceStr = call.getString("modifiedSince")
+
+            // Capture syncToken BEFORE querying so no writes are missed
+            val syncToken = Instant.now().toString()
 
             val since = sinceStr?.let { Instant.parse(it) }
-            val buckets = database.getStepsSince(since)
+            val modifiedSince = modifiedSinceStr?.let { Instant.parse(it) }
+            val buckets = database.getStepsSince(since, modifiedSince)
 
             val stepsArray = JSArray()
             buckets.forEach { bucket ->
@@ -160,6 +165,7 @@ class StepSensorPlugin : Plugin() {
 
             val result = JSObject().apply {
                 put("steps", stepsArray)
+                put("syncToken", syncToken)
             }
             call.resolve(result)
         } catch (e: Exception) {

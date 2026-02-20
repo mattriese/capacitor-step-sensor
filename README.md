@@ -59,6 +59,8 @@ On every app open or resume, call both, then read the latest data:
 import { App } from '@capacitor/app';
 import { StepSensor } from 'capacitor-step-sensor';
 
+let syncToken: string | undefined;
+
 App.addListener('appStateChange', async ({ isActive }) => {
   if (!isActive) return;
 
@@ -70,11 +72,19 @@ App.addListener('appStateChange', async ({ isActive }) => {
   // Backfill past windows with late-arriving watch data from Health Connect
   await StepSensor.backfillFromHealthConnect({ windows });
 
-  // Read the latest step data
-  const result = await StepSensor.getTrackedSteps({ since: getLastSyncTime() });
-  syncToServer(result.steps);
+  // Read only buckets that changed since last sync
+  const result = await StepSensor.getTrackedSteps({
+    modifiedSince: syncToken,
+  });
+  syncToken = result.syncToken;
+
+  if (result.steps.length > 0) {
+    upsertToYourDatabase(result.steps);
+  }
 });
 ```
+
+The `syncToken` / `modifiedSince` pattern ensures you only receive buckets that were created or updated since your last read. This is important because backfill can retroactively update old buckets when late-arriving watch data arrives. Without `modifiedSince`, you'd need to re-read and diff all buckets on every poll.
 
 Also call `scheduleStepTracking` whenever commitments are created or modified -- not just on app open.
 
@@ -137,7 +147,15 @@ for (const bucket of result.steps) {
 const recent = await StepSensor.getTrackedSteps({
   since: '2025-03-15T09:00:00.000Z',
 });
+
+// Incremental sync: only get buckets modified since last poll
+const changed = await StepSensor.getTrackedSteps({
+  modifiedSince: lastSyncToken,
+});
+// Save changed.syncToken for next call
 ```
+
+**Incremental sync with `modifiedSince`:** Each response includes a `syncToken`. Pass it back as `modifiedSince` on the next call to get only buckets that were created or updated since that point. This is useful for syncing to an external database without re-reading everything. Buckets updated by backfill (retroactive watch data) will appear in the next incremental read.
 
 ### 6. Start/stop tracking manually (optional)
 
@@ -355,9 +373,10 @@ If omitted, deletes all data.
 
 #### GetTrackedStepsResult
 
-| Prop        | Type                      |
-| ----------- | ------------------------- |
-| **`steps`** | <code>StepBucket[]</code> |
+| Prop            | Type                      | Description                                                                                                       |
+| --------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **`steps`**     | <code>StepBucket[]</code> |                                                                                                                   |
+| **`syncToken`** | <code>string</code>       | ISO 8601 timestamp. Pass this as `modifiedSince` on the next call to get only rows that changed since this query. |
 
 
 #### StepBucket
@@ -372,9 +391,10 @@ If omitted, deletes all data.
 
 #### GetTrackedStepsOptions
 
-| Prop        | Type                | Description                                                             |
-| ----------- | ------------------- | ----------------------------------------------------------------------- |
-| **`since`** | <code>string</code> | ISO 8601 timestamp. Only return buckets starting at or after this time. |
+| Prop                | Type                | Description                                                                                                                                             |
+| ------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`since`**         | <code>string</code> | ISO 8601 timestamp. Only return buckets starting at or after this time.                                                                                 |
+| **`modifiedSince`** | <code>string</code> | ISO 8601 timestamp. Only return buckets modified after this time. Pass the `syncToken` from a previous `getTrackedSteps` call to get only changed rows. |
 
 
 #### BackfillResult

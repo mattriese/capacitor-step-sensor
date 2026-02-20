@@ -19,6 +19,8 @@ export interface StartStepTrackingOptions {
 export interface GetTrackedStepsOptions {
   /** ISO 8601 timestamp. Only return buckets starting at or after this time. */
   since?: string;
+  /** ISO 8601 timestamp. Only return buckets modified after this time. Pass the `syncToken` from a previous `getTrackedSteps` call to get only changed rows. */
+  modifiedSince?: string;
 }
 
 export interface BackfillOptions {
@@ -55,6 +57,8 @@ export interface StepBucket {
 
 export interface GetTrackedStepsResult {
   steps: StepBucket[];
+  /** ISO 8601 timestamp. Pass this as `modifiedSince` on the next call to get only rows that changed since this query. */
+  syncToken: string;
 }
 
 export interface StepSensorPlugin {
