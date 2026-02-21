@@ -107,7 +107,7 @@ class StepCounterService : Service(), SensorEventListener {
         startHealthConnectPoller()
         startTimer()
 
-        Log.d(TAG, "Step tracking started")
+        Log.i(TAG, "Step tracking started | plugin build: ${PluginBuildInfo.BUILD_ID}")
         return START_STICKY
     }
 

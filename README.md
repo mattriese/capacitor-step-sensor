@@ -214,6 +214,47 @@ Because `readRecords` queries by time range (not a changes token), backfill is i
 
 See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm design.
 
+## Local Development (with flow-ionic)
+
+This plugin is consumed by flow-ionic via [yalc](https://github.com/wclr/yalc). After making changes, you need to push the updated plugin and clean the Gradle cache so the new Kotlin code is compiled fresh.
+
+### Quick version (recommended)
+
+From flow-ionic, run the all-in-one script:
+
+```bash
+cd ~/webdev/flow-ionic
+npm run plugin:push
+```
+
+This runs `scripts/yalc-push.sh` in this repo (stamps a git hash build ID, builds TS, pushes to yalc), then runs `scripts/plugin-sync.sh` in flow-ionic (yalc update, gradlew clean, cap sync).
+
+### Manual version
+
+```bash
+# 1. In this repo — stamp build ID, build, and push
+cd ~/webdev/capacitor-step-sensor
+bash scripts/yalc-push.sh
+
+# 2. In flow-ionic — sync the update
+cd ~/webdev/flow-ionic
+npm run plugin:sync
+```
+
+### Verifying the build
+
+Every build is stamped with the git short hash from this repo. You can verify what code is running:
+
+- **Logcat:** When the step tracking service starts, it logs: `Step tracking started | plugin build: <hash>`
+- **JS:** Call `StepSensor.getPluginInfo()` — returns `{ buildId: "<hash>" }`
+- **Settings UI:** In flow-ionic's GeneralSettings (non-production), the plugin build ID is shown next to the environment badge
+
+If the build ID is `"dev"`, the plugin was built without the push script (e.g. raw `npm run build && yalc push`).
+
+### Why Gradle clean matters
+
+Even when Kotlin source files change on disk, Gradle may use cached compiled `.class` files from a previous build. `npm run plugin:sync` (and `plugin:push`) run `./gradlew clean` to force recompilation. Without this, you may deploy an APK that still runs old plugin code.
+
 ## API Reference
 
 <docgen-index>
@@ -226,6 +267,7 @@ See [HC_TEMPORAL_ACCURACY.md](HC_TEMPORAL_ACCURACY.md) for the full algorithm de
 * [`clearData(...)`](#cleardata)
 * [`checkExactAlarmPermission()`](#checkexactalarmpermission)
 * [`requestExactAlarmPermission()`](#requestexactalarmpermission)
+* [`getPluginInfo()`](#getplugininfo)
 * [Interfaces](#interfaces)
 
 </docgen-index>
@@ -379,6 +421,21 @@ Returns { granted: true } on Android &lt; 12, iOS, and web (no action needed).
 --------------------
 
 
+### getPluginInfo()
+
+```typescript
+getPluginInfo() => Promise<PluginInfoResult>
+```
+
+Returns build metadata for the plugin. The buildId is a git short hash
+stamped at yalc push time, or "dev" if built without the push script.
+Use this to verify the running plugin matches the expected source version.
+
+**Returns:** <code>Promise&lt;<a href="#plugininforesult">PluginInfoResult</a>&gt;</code>
+
+--------------------
+
+
 ### Interfaces
 
 
@@ -457,5 +514,12 @@ Returns { granted: true } on Android &lt; 12, iOS, and web (no action needed).
 | Prop          | Type                 | Description                                                                               |
 | ------------- | -------------------- | ----------------------------------------------------------------------------------------- |
 | **`granted`** | <code>boolean</code> | Whether the app can schedule exact alarms. Always true on Android &lt; 12 and on web/iOS. |
+
+
+#### PluginInfoResult
+
+| Prop          | Type                | Description                                                                          |
+| ------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| **`buildId`** | <code>string</code> | Git short hash stamped at yalc push time, or "dev" if built without the push script. |
 
 </docgen-api>

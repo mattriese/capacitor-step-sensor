@@ -342,6 +342,14 @@ class StepSensorPlugin : Plugin() {
         }
     }
 
+    @PluginMethod
+    fun getPluginInfo(call: PluginCall) {
+        val result = JSObject().apply {
+            put("buildId", PluginBuildInfo.BUILD_ID)
+        }
+        call.resolve(result)
+    }
+
     // --- Permission helpers ---
 
     private fun hasAllRequiredPermissions(): Boolean {

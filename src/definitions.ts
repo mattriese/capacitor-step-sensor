@@ -66,6 +66,11 @@ export interface ExactAlarmPermissionResult {
   granted: boolean;
 }
 
+export interface PluginInfoResult {
+  /** Git short hash stamped at yalc push time, or "dev" if built without the push script. */
+  buildId: string;
+}
+
 export interface StepSensorPlugin {
   /**
    * Schedule the foreground service to start and stop at specific times.
@@ -136,4 +141,11 @@ export interface StepSensorPlugin {
    * Returns { granted: true } on Android < 12, iOS, and web (no action needed).
    */
   requestExactAlarmPermission(): Promise<ExactAlarmPermissionResult>;
+
+  /**
+   * Returns build metadata for the plugin. The buildId is a git short hash
+   * stamped at yalc push time, or "dev" if built without the push script.
+   * Use this to verify the running plugin matches the expected source version.
+   */
+  getPluginInfo(): Promise<PluginInfoResult>;
 }
