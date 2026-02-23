@@ -19,6 +19,8 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.request.ChangesTokenRequest
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -236,13 +238,50 @@ class StepCounterService : Service(), SensorEventListener {
             return
         }
 
-        // Get initial changes token
+        // Get initial changes token, then snapshot all existing records as baseline.
+        // Order matters: token FIRST, then snapshot. Any HC changes after the token
+        // is obtained will appear in subsequent getChanges() calls. The snapshot
+        // gives us baseline counts to diff against, so late-appearing records
+        // (e.g., Samsung's daily cumulative record) produce correct small deltas
+        // instead of crediting their entire cumulative count.
         scope.launch {
             hcMutex.withLock {
                 try {
-                    changesToken = healthConnectClient!!.getChangesToken(
+                    val client = healthConnectClient!!
+                    changesToken = client.getChangesToken(
                         ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
                     )
+
+                    // Snapshot all existing step records to establish baselines
+                    val now = Instant.now()
+                    val snapshot = client.readRecords(
+                        ReadRecordsRequest(
+                            StepsRecord::class,
+                            timeRangeFilter = TimeRangeFilter.between(
+                                now.minus(Duration.ofHours(48)), now
+                            )
+                        )
+                    )
+
+                    if (snapshot.records.isNotEmpty()) {
+                        val baselineRecords = snapshot.records.map { sr ->
+                            HcStepRecord(
+                                recordId = sr.metadata.id,
+                                startTime = sr.startTime,
+                                endTime = sr.endTime,
+                                count = sr.count,
+                                dataOrigin = sr.metadata.dataOrigin.packageName
+                            )
+                        }
+                        hcDeltaTracker.computeDeltas(baselineRecords)
+                        hcDeltaTracker.markProcessed(now)
+                        Log.d(TAG, "HC baseline snapshot: ${baselineRecords.size} records" +
+                            " | origins=${baselineRecords.map { it.dataOrigin }.toSet()}")
+                    } else {
+                        Log.d(TAG, "HC baseline snapshot: no records found, " +
+                            "first timer tick will establish baselines")
+                    }
+
                     Log.d(TAG, "Health Connect poller initialized")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to initialize Health Connect poller", e)

@@ -441,7 +441,7 @@ class StepTrackingLogicTest {
     }
 
     @Test
-    fun `subtractAndFill - no zero buckets (surplus to last bucket)`() {
+    fun `subtractAndFill - no zero buckets discards surplus`() {
         val existing = mapOf(
             Instant.parse("2026-01-15T10:00:00Z") to 10,
             Instant.parse("2026-01-15T10:00:30Z") to 10,
@@ -453,9 +453,8 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:02:00Z"),
             130, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
-        // surplus = 130 - 31 = 99, no zero buckets → last bucket gets existing + surplus
-        assertEquals(1, result.size)
-        assertEquals(1 + 99, result[Instant.parse("2026-01-15T10:01:30Z")])
+        // surplus = 130 - 31 = 99, no zero buckets → surplus is discarded
+        assertTrue(result.isEmpty())
     }
 
     @Test
@@ -479,16 +478,15 @@ class StepTrackingLogicTest {
     }
 
     @Test
-    fun `subtractAndFill - single bucket`() {
+    fun `subtractAndFill - single bucket with existing steps discards surplus`() {
         val existing = mapOf(Instant.parse("2026-01-15T10:00:00Z") to 5)
         val result = StepTrackingLogic.subtractAndFill(
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:00:30Z"),
             10, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
-        // surplus = 10 - 5 = 5, no zero buckets → last (only) bucket gets 5 + 5 = 10
-        assertEquals(1, result.size)
-        assertEquals(10, result[Instant.parse("2026-01-15T10:00:00Z")])
+        // surplus = 10 - 5 = 5, no zero buckets → surplus is discarded
+        assertTrue(result.isEmpty())
     }
 
     @Test
@@ -509,8 +507,8 @@ class StepTrackingLogicTest {
     }
 
     @Test
-    fun `subtractAndFill - cap overflow redistributes to last bucket`() {
-        // 2 zero buckets, surplus = 200 → capacity = 2*90 = 180, leftover = 20
+    fun `subtractAndFill - cap overflow discards excess`() {
+        // 2 zero buckets, surplus = 200 → capacity = 2*90 = 180, excess 20 discarded
         val existing = mapOf(
             Instant.parse("2026-01-15T10:00:00Z") to 0,
             Instant.parse("2026-01-15T10:00:30Z") to 0
@@ -520,9 +518,9 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:01:00Z"),
             200, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
-        // Each zero bucket gets 90, leftover 20 to last in-window bucket (which is 10:00:30)
+        // Each zero bucket gets 90, excess 20 is discarded
         assertEquals(90, result[Instant.parse("2026-01-15T10:00:00Z")])
-        assertEquals(90 + 20, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertEquals(90, result[Instant.parse("2026-01-15T10:00:30Z")])
     }
 
     @Test
@@ -910,7 +908,7 @@ class StepTrackingLogicTest {
     }
 
     @Test
-    fun `distributeWatchSurplus - cap enforcement`() {
+    fun `distributeWatchSurplus - cap enforcement discards excess`() {
         val existing = mapOf(
             Instant.parse("2026-01-15T10:00:00Z") to 0,
             Instant.parse("2026-01-15T10:00:30Z") to 0
@@ -921,13 +919,13 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:01:00Z"),
             now = farFutureNow
         )
-        // 2 zero buckets, cap 90 each = 180 capacity, leftover 20 to last bucket
+        // 2 zero buckets, cap 90 each = 180 capacity, surplus 200 clamped to 180
         assertEquals(90, result[Instant.parse("2026-01-15T10:00:00Z")])
-        assertEquals(90 + 20, result[Instant.parse("2026-01-15T10:00:30Z")])
+        assertEquals(90, result[Instant.parse("2026-01-15T10:00:30Z")])
     }
 
     @Test
-    fun `distributeWatchSurplus - overflow to last bucket when no zeros`() {
+    fun `distributeWatchSurplus - no zero buckets discards surplus`() {
         val existing = mapOf(
             Instant.parse("2026-01-15T10:00:00Z") to 10,
             Instant.parse("2026-01-15T10:00:30Z") to 5
@@ -938,9 +936,8 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:01:00Z"),
             now = farFutureNow
         )
-        // No zero buckets → last bucket gets existing + surplus
-        assertEquals(1, result.size)
-        assertEquals(5 + 50, result[Instant.parse("2026-01-15T10:00:30Z")])
+        // No zero buckets → surplus is discarded (all buckets have phone sensor data)
+        assertTrue(result.isEmpty())
     }
 
     @Test

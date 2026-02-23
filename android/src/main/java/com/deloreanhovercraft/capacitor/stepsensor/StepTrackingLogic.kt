@@ -127,8 +127,9 @@ object StepTrackingLogic {
      *
      * Full inclusion policy: the entire hcCount is used (not proportional to in-window overlap).
      * Only buckets within [commitmentStart, commitmentEnd) receive steps.
-     * Each zero-step bucket is capped at perBucketCap. Overflow goes to the last
-     * in-window bucket uncapped, to avoid losing steps.
+     * Each zero-step bucket is capped at perBucketCap. Surplus beyond total
+     * capacity is discarded — it represents steps that can't be physiologically
+     * attributed to the available time window.
      *
      * @return Map of bucketStart → final step count for that bucket
      */
@@ -173,32 +174,17 @@ object StepTrackingLogic {
         val result = mutableMapOf<Instant, Int>()
 
         if (zeroBuckets.isNotEmpty()) {
+            // Clamp surplus to total capacity — anything beyond is discarded
             val totalCapacity = zeroBuckets.size.toLong() * perBucketCap
-
-            if (surplus <= totalCapacity) {
-                // Fits within caps — distribute evenly
-                val perBucket = (surplus / zeroBuckets.size).toInt()
-                val remainder = (surplus % zeroBuckets.size).toInt()
-                for ((i, bucket) in zeroBuckets.withIndex()) {
-                    result[bucket] = perBucket + if (i < remainder) 1 else 0
-                }
-            } else {
-                // Overflow: fill each zero bucket to cap
-                for (bucket in zeroBuckets) {
-                    result[bucket] = perBucketCap
-                }
-                // Leftover to last in-window bucket (uncapped)
-                val leftover = (surplus - totalCapacity).toInt()
-                val lastBucket = inWindowBuckets.last()
-                val existing = existingBuckets[lastBucket] ?: 0
-                result[lastBucket] = (result[lastBucket] ?: existing) + leftover
+            val clampedSurplus = minOf(surplus, totalCapacity)
+            val perBucket = (clampedSurplus / zeroBuckets.size).toInt()
+            val remainder = (clampedSurplus % zeroBuckets.size).toInt()
+            for ((i, bucket) in zeroBuckets.withIndex()) {
+                result[bucket] = perBucket + if (i < remainder) 1 else 0
             }
-        } else {
-            // No zero buckets: all surplus to last in-window bucket (uncapped)
-            val lastBucket = inWindowBuckets.last()
-            val existing = existingBuckets[lastBucket] ?: 0
-            result[lastBucket] = existing + surplus.toInt()
         }
+        // If no zero buckets, surplus is discarded — all buckets already have
+        // phone sensor data and we can't meaningfully add watch steps on top.
 
         return result
     }
@@ -269,7 +255,10 @@ object StepTrackingLogic {
     /**
      * Distribute surplus steps into empty 30s buckets within [rangeStart, rangeEnd).
      * Buckets are clamped to [floor(rangeStart), min(rangeEnd, now)).
-     * Zero-step buckets get even distribution with per-bucket cap; overflow to last bucket.
+     * Zero-step buckets get even distribution with per-bucket cap.
+     * Surplus beyond total capacity is discarded — it represents steps that
+     * can't be physiologically attributed to the available time window
+     * (e.g., a large HC delta from a cumulative record catching up).
      */
     fun distributeWatchSurplus(
         surplus: Long,
@@ -296,27 +285,17 @@ object StepTrackingLogic {
         val result = mutableMapOf<Instant, Int>()
 
         if (zeroBuckets.isNotEmpty()) {
+            // Clamp surplus to total capacity — anything beyond is discarded
             val totalCapacity = zeroBuckets.size.toLong() * perBucketCap
-            if (surplus <= totalCapacity) {
-                val perBucket = (surplus / zeroBuckets.size).toInt()
-                val remainder = (surplus % zeroBuckets.size).toInt()
-                for ((i, bucket) in zeroBuckets.withIndex()) {
-                    result[bucket] = perBucket + if (i < remainder) 1 else 0
-                }
-            } else {
-                for (bucket in zeroBuckets) {
-                    result[bucket] = perBucketCap
-                }
-                val leftover = (surplus - totalCapacity).toInt()
-                val lastBucket = buckets.last()
-                val existing = existingBuckets[lastBucket] ?: 0
-                result[lastBucket] = (result[lastBucket] ?: existing) + leftover
+            val clampedSurplus = minOf(surplus, totalCapacity)
+            val perBucket = (clampedSurplus / zeroBuckets.size).toInt()
+            val remainder = (clampedSurplus % zeroBuckets.size).toInt()
+            for ((i, bucket) in zeroBuckets.withIndex()) {
+                result[bucket] = perBucket + if (i < remainder) 1 else 0
             }
-        } else {
-            val lastBucket = buckets.last()
-            val existing = existingBuckets[lastBucket] ?: 0
-            result[lastBucket] = existing + surplus.toInt()
         }
+        // If no zero buckets, surplus is discarded — all buckets already have
+        // phone sensor data and we can't meaningfully add watch steps on top.
 
         return result
     }
