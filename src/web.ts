@@ -1,6 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { BackfillResult, ExactAlarmPermissionResult, PluginInfoResult, StepSensorPlugin } from './definitions';
+import type { BackfillResult, ExactAlarmPermissionResult, PluginInfoResult, StepSensorPermissionStatus, StepSensorPlugin } from './definitions';
 
 export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
   async scheduleStepTracking(): Promise<void> {
@@ -40,5 +40,13 @@ export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
 
   async getPluginInfo(): Promise<PluginInfoResult> {
     return { buildId: 'web' };
+  }
+
+  async checkPermissions(): Promise<StepSensorPermissionStatus> {
+    return { activityRecognition: 'granted', notifications: 'granted' };
+  }
+
+  async requestPermissions(): Promise<StepSensorPermissionStatus> {
+    return { activityRecognition: 'granted', notifications: 'granted' };
   }
 }

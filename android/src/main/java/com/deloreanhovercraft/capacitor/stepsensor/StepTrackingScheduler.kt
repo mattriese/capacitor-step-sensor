@@ -1,11 +1,14 @@
 package com.deloreanhovercraft.capacitor.stepsensor
 
+import android.Manifest
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -78,8 +81,14 @@ class StepTrackingScheduler(private val context: Context) {
 
     /**
      * Start the step counter service immediately.
+     * Silently skips if ACTIVITY_RECOGNITION is not granted (avoids SecurityException crash).
      */
     fun startServiceNow() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "startServiceNow: ACTIVITY_RECOGNITION not granted — skipping service start")
+            return
+        }
         val intent = Intent(context, StepCounterService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
