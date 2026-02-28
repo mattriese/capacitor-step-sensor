@@ -32,6 +32,30 @@ import java.time.Duration
 import java.time.Instant
 import kotlin.math.max
 
+data class OriginTickDetail(
+    val delta: Long,
+    val phoneStepsInRange: Double,
+    val watchSurplus: Long,
+    val bucketsFilledByOrigin: Int,
+    val stepsDistributedByOrigin: Int
+)
+
+data class TickAuditData(
+    val tickNumber: Long,
+    val timestamp: String,
+    val phoneDelta: Long,
+    val latestSensorValue: Long,
+    val lastSensorBaseline: Long,
+    val hcRecordsCount: Int,
+    val hcRecords: List<HcStepRecord>,
+    val hcDeltas: Map<String, Long>,
+    val existingBucketCount: Int,
+    val existingBucketTotalSteps: Int,
+    val perOriginDetail: Map<String, OriginTickDetail>,
+    val filledBucketCount: Int,
+    val filledBucketTotalSteps: Int
+)
+
 class StepCounterService : Service(), SensorEventListener {
 
     companion object {
@@ -45,6 +69,10 @@ class StepCounterService : Service(), SensorEventListener {
 
         @Volatile
         var isRunning = false
+            private set
+
+        @Volatile
+        var lastTickAudit: TickAuditData? = null
             private set
 
         /**
@@ -361,6 +389,8 @@ class StepCounterService : Service(), SensorEventListener {
     private fun onTimerTick() {
         tickCount++
         val phoneDelta = recordPhoneSensorInterval()
+        val capturedLatestSensor = latestSensorValue
+        val capturedLastBaseline = lastSensorCount
 
         scope.launch {
             val now = Instant.now()
@@ -375,7 +405,7 @@ class StepCounterService : Service(), SensorEventListener {
 
             // Log every tick so we can verify the service is alive and see what's happening
             Log.d(TAG, "TICK #$tickCount | now=$now | phoneDelta=$phoneDelta" +
-                " | latestSensor=$latestSensorValue | lastBaseline=$lastSensorCount" +
+                " | latestSensor=$capturedLatestSensor | lastBaseline=$capturedLastBaseline" +
                 " | hcRecords=${hcRecords.size}" +
                 " | hcClientNull=${healthConnectClient == null}" +
                 " | changesTokenNull=${changesToken == null}")
@@ -388,7 +418,24 @@ class StepCounterService : Service(), SensorEventListener {
                 }
             }
 
-            if (hcRecords.isEmpty()) return@launch
+            if (hcRecords.isEmpty()) {
+                lastTickAudit = TickAuditData(
+                    tickNumber = tickCount,
+                    timestamp = now.toString(),
+                    phoneDelta = phoneDelta,
+                    latestSensorValue = capturedLatestSensor,
+                    lastSensorBaseline = capturedLastBaseline,
+                    hcRecordsCount = 0,
+                    hcRecords = emptyList(),
+                    hcDeltas = emptyMap(),
+                    existingBucketCount = 0,
+                    existingBucketTotalSteps = 0,
+                    perOriginDetail = emptyMap(),
+                    filledBucketCount = 0,
+                    filledBucketTotalSteps = 0
+                )
+                return@launch
+            }
 
             // --- HC Delta Tracking ---
             val deltas = hcDeltaTracker.computeDeltas(hcRecords)
@@ -398,12 +445,42 @@ class StepCounterService : Service(), SensorEventListener {
                 Log.d(TAG, "HC_DELTA | Baseline established | records=${hcRecords.size}" +
                     " | origins=${deltas.keys}")
                 hcDeltaTracker.markProcessed(now)
+                lastTickAudit = TickAuditData(
+                    tickNumber = tickCount,
+                    timestamp = now.toString(),
+                    phoneDelta = phoneDelta,
+                    latestSensorValue = capturedLatestSensor,
+                    lastSensorBaseline = capturedLastBaseline,
+                    hcRecordsCount = hcRecords.size,
+                    hcRecords = hcRecords,
+                    hcDeltas = deltas,
+                    existingBucketCount = 0,
+                    existingBucketTotalSteps = 0,
+                    perOriginDetail = emptyMap(),
+                    filledBucketCount = 0,
+                    filledBucketTotalSteps = 0
+                )
                 return@launch
             }
 
             val totalDelta = deltas.values.sum()
             if (totalDelta == 0L) {
                 Log.d(TAG, "HC_DELTA | No new steps | deltas=$deltas")
+                lastTickAudit = TickAuditData(
+                    tickNumber = tickCount,
+                    timestamp = now.toString(),
+                    phoneDelta = phoneDelta,
+                    latestSensorValue = capturedLatestSensor,
+                    lastSensorBaseline = capturedLastBaseline,
+                    hcRecordsCount = hcRecords.size,
+                    hcRecords = hcRecords,
+                    hcDeltas = deltas,
+                    existingBucketCount = 0,
+                    existingBucketTotalSteps = 0,
+                    perOriginDetail = emptyMap(),
+                    filledBucketCount = 0,
+                    filledBucketTotalSteps = 0
+                )
                 return@launch
             }
 
@@ -419,9 +496,13 @@ class StepCounterService : Service(), SensorEventListener {
                 .associate { Instant.parse(it.bucketStart) to it.steps }
 
             val allFilledBuckets = mutableMapOf<Instant, Int>()
+            val originDetails = mutableMapOf<String, OriginTickDetail>()
 
             for ((origin, delta) in deltas) {
-                if (delta <= 0) continue
+                if (delta <= 0) {
+                    originDetails[origin] = OriginTickDetail(delta, 0.0, 0, 0, 0)
+                    continue
+                }
 
                 val phoneTotalInRange = StepTrackingLogic.computeProratedPhoneSteps(
                     existingBuckets, lastProcessTime, now
@@ -431,6 +512,9 @@ class StepCounterService : Service(), SensorEventListener {
                 Log.d(TAG, "HC_DELTA | origin=$origin | delta=$delta" +
                     " | phoneInRange=${phoneTotalInRange.toLong()} | watchSurplus=$watchSurplus")
 
+                var originBucketsFilled = 0
+                var originStepsDistributed = 0
+
                 if (watchSurplus > 0) {
                     val filled = StepTrackingLogic.distributeWatchSurplus(
                         watchSurplus, existingBuckets, lastProcessTime, now, now = now
@@ -439,7 +523,17 @@ class StepCounterService : Service(), SensorEventListener {
                         allFilledBuckets[bucketStart] =
                             max(allFilledBuckets[bucketStart] ?: 0, steps)
                     }
+                    originBucketsFilled = filled.size
+                    originStepsDistributed = filled.values.sum()
                 }
+
+                originDetails[origin] = OriginTickDetail(
+                    delta = delta,
+                    phoneStepsInRange = phoneTotalInRange,
+                    watchSurplus = watchSurplus,
+                    bucketsFilledByOrigin = originBucketsFilled,
+                    stepsDistributedByOrigin = originStepsDistributed
+                )
             }
 
             Log.d(TAG, "HC_DELTA_FILL | existingBuckets=${existingBuckets.size}" +
@@ -454,6 +548,22 @@ class StepCounterService : Service(), SensorEventListener {
                     database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
                 }
             }
+
+            lastTickAudit = TickAuditData(
+                tickNumber = tickCount,
+                timestamp = now.toString(),
+                phoneDelta = phoneDelta,
+                latestSensorValue = capturedLatestSensor,
+                lastSensorBaseline = capturedLastBaseline,
+                hcRecordsCount = hcRecords.size,
+                hcRecords = hcRecords,
+                hcDeltas = deltas,
+                existingBucketCount = existingBuckets.size,
+                existingBucketTotalSteps = existingBuckets.values.sum(),
+                perOriginDetail = originDetails,
+                filledBucketCount = allFilledBuckets.size,
+                filledBucketTotalSteps = allFilledBuckets.values.sum()
+            )
 
             hcDeltaTracker.markProcessed(now)
         }

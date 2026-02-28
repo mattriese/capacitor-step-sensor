@@ -381,7 +381,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(4, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -401,7 +401,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         // surplus = 120 - 20 = 100, distributed into 2 zero buckets
         assertEquals(2, result.size)
         assertEquals(50, result[Instant.parse("2026-01-15T10:01:00Z")])
@@ -420,7 +420,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -436,7 +436,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -452,7 +452,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             130, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         // surplus = 130 - 31 = 99, no zero buckets → surplus is discarded
         assertTrue(result.isEmpty())
     }
@@ -464,7 +464,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:00:30Z"),
             0, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -473,7 +473,7 @@ class StepTrackingLogicTest {
         val t = Instant.parse("2026-01-15T10:00:00Z")
         val result = StepTrackingLogic.subtractAndFill(
             t, t, 100, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -484,7 +484,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:00:30Z"),
             10, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         // surplus = 10 - 5 = 5, no zero buckets → surplus is discarded
         assertTrue(result.isEmpty())
     }
@@ -501,7 +501,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
             160, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(80, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(80, result[Instant.parse("2026-01-15T10:00:30Z")])
     }
@@ -517,7 +517,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
             200, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         // Each zero bucket gets 90, excess 20 is discarded
         assertEquals(90, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(90, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -539,7 +539,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T09:59:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
             120, existing, commitStart, commitEnd, now = farFutureNow
-        )
+        ).filledBuckets
         // Full inclusion: all 120 steps credited, only 2 in-window buckets
         assertEquals(2, result.size)
         assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -564,7 +564,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T11:59:00Z"),
             Instant.parse("2026-01-15T12:01:00Z"),
             100, existing, commitStart, commitEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(2, result.size)
         assertEquals(50, result[Instant.parse("2026-01-15T11:59:00Z")])
         assertEquals(50, result[Instant.parse("2026-01-15T11:59:30Z")])
@@ -583,7 +583,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T08:00:00Z"),
             Instant.parse("2026-01-15T08:01:00Z"),
             100, existing, commitStart, commitEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -599,7 +599,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:30Z"),
             10, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(3, result.size)
         // 10 / 3 = 3 remainder 1 → first bucket gets 4
         assertEquals(4, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -614,7 +614,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
             60, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(2, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -629,7 +629,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
-        )
+        ).filledBuckets
         assertEquals(2, result.size)
         assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(60, result[Instant.parse("2026-01-15T10:00:30Z")])
@@ -646,7 +646,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:02:00Z"),
             120, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -659,7 +659,7 @@ class StepTrackingLogicTest {
             Instant.parse("2026-01-15T10:00:00Z"),
             Instant.parse("2026-01-15T10:01:00Z"),
             60, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
-        )
+        ).filledBuckets
         // Only the 10:00:00 bucket qualifies (isBefore(10:00:30))
         assertEquals(1, result.size)
         assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -677,7 +677,7 @@ class StepTrackingLogicTest {
         )
         val result = StepTrackingLogic.processHcRecords(
             records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = now
-        )
+        ).filledBuckets
         // Only 2 buckets (10:00:00 and 10:00:30) should get steps
         assertEquals(2, result.size)
         assertEquals(60, result[Instant.parse("2026-01-15T10:00:00Z")])
@@ -692,7 +692,7 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.processHcRecords(
             emptyList(), emptyMap(),
             wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertTrue(result.isEmpty())
     }
 
@@ -707,7 +707,7 @@ class StepTrackingLogicTest {
         )
         val result = StepTrackingLogic.processHcRecords(
             records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
     }
@@ -728,7 +728,7 @@ class StepTrackingLogicTest {
         )
         val result = StepTrackingLogic.processHcRecords(
             records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(1, result.size)
         assertEquals(50, result[Instant.parse("2026-01-15T10:00:00Z")])
     }
@@ -749,13 +749,114 @@ class StepTrackingLogicTest {
         )
         val result = StepTrackingLogic.processHcRecords(
             records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
-        )
+        ).filledBuckets
         assertEquals(4, result.size)
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:00Z")])
         assertEquals(30, result[Instant.parse("2026-01-15T10:00:30Z")])
         // Second record: 55/2 = 27 remainder 1 → first gets 28
         assertEquals(28, result[Instant.parse("2026-01-15T10:01:00Z")])
         assertEquals(27, result[Instant.parse("2026-01-15T10:01:30Z")])
+    }
+
+    // --- subtractAndFill audit data ---
+
+    @Test
+    fun `subtractAndFill - audit data captures phone steps and surplus`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 10,
+            Instant.parse("2026-01-15T10:00:30Z") to 10,
+            Instant.parse("2026-01-15T10:01:00Z") to 0,
+            Instant.parse("2026-01-15T10:01:30Z") to 0
+        )
+        val safResult = StepTrackingLogic.subtractAndFill(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:02:00Z"),
+            120, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
+        )
+        assertEquals(20L, safResult.phoneStepsInWindow)
+        assertEquals(100L, safResult.surplus)
+        assertEquals(2, safResult.zeroBucketsAvailable)
+        assertEquals(2, safResult.bucketsActuallyFilled)
+        assertEquals(100, safResult.stepsDistributed)
+    }
+
+    @Test
+    fun `subtractAndFill - audit data zero surplus when phone covers HC`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 30,
+            Instant.parse("2026-01-15T10:00:30Z") to 30
+        )
+        val safResult = StepTrackingLogic.subtractAndFill(
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            60, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
+        )
+        assertEquals(60L, safResult.phoneStepsInWindow)
+        assertEquals(0L, safResult.surplus)
+        assertEquals(0, safResult.zeroBucketsAvailable)
+        assertEquals(0, safResult.bucketsActuallyFilled)
+        assertEquals(0, safResult.stepsDistributed)
+    }
+
+    // --- processHcRecords audit data ---
+
+    @Test
+    fun `processHcRecords - perSourceDetail captures per-origin breakdown`() {
+        val records = listOf(
+            HcStepRecord(
+                "", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:01:00Z"),
+                60, "com.sec.android.app.shealth"
+            ),
+            HcStepRecord(
+                "", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:00:30Z"),
+                30, "com.google.android.apps.fitness"
+            )
+        )
+        val processResult = StepTrackingLogic.processHcRecords(
+            records, emptyMap(), wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
+        )
+        assertEquals(2, processResult.perSourceDetail.size)
+
+        val shealth = processResult.perSourceDetail["com.sec.android.app.shealth"]!!
+        assertEquals(1, shealth.recordCount)
+        assertEquals(60L, shealth.totalHcCount)
+        assertEquals(0L, shealth.phoneStepsInWindow)
+        assertEquals(60L, shealth.surplusComputed)
+        assertEquals(2, shealth.bucketsActuallyFilled)
+        assertEquals(60, shealth.stepsDistributed)
+
+        val fitness = processResult.perSourceDetail["com.google.android.apps.fitness"]!!
+        assertEquals(1, fitness.recordCount)
+        assertEquals(30L, fitness.totalHcCount)
+        assertEquals(0L, fitness.phoneStepsInWindow)
+        assertEquals(30L, fitness.surplusComputed)
+        assertEquals(1, fitness.bucketsActuallyFilled)
+        assertEquals(30, fitness.stepsDistributed)
+    }
+
+    @Test
+    fun `processHcRecords - perSourceDetail shows phone steps subtracted`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 20,
+            Instant.parse("2026-01-15T10:00:30Z") to 0
+        )
+        val records = listOf(
+            HcStepRecord(
+                "", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:01:00Z"),
+                60, "android"
+            )
+        )
+        val processResult = StepTrackingLogic.processHcRecords(
+            records, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
+        )
+        val detail = processResult.perSourceDetail["android"]!!
+        assertEquals(20L, detail.phoneStepsInWindow)
+        assertEquals(40L, detail.surplusComputed)
+        assertEquals(1, detail.bucketsActuallyFilled) // only 1 zero bucket
+        assertEquals(40, detail.stepsDistributed)
     }
 
     // --- computeProratedPhoneSteps ---

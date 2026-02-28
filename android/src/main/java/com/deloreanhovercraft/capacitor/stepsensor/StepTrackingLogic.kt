@@ -15,6 +15,30 @@ data class HcStepRecord(
     val dataOrigin: String
 )
 
+data class SubtractAndFillResult(
+    val filledBuckets: Map<Instant, Int>,
+    val phoneStepsInWindow: Long,
+    val surplus: Long,
+    val zeroBucketsAvailable: Int,
+    val bucketsActuallyFilled: Int,
+    val stepsDistributed: Int
+)
+
+data class SourceFillDetail(
+    val recordCount: Int,
+    val totalHcCount: Long,
+    val phoneStepsInWindow: Long,
+    val surplusComputed: Long,
+    val zeroBucketsAvailable: Int,
+    val bucketsActuallyFilled: Int,
+    val stepsDistributed: Int
+)
+
+data class ProcessHcResult(
+    val filledBuckets: Map<Instant, Int>,
+    val perSourceDetail: Map<String, SourceFillDetail>
+)
+
 object StepTrackingLogic {
 
     const val MAX_STEPS_PER_BUCKET = 90
@@ -142,8 +166,9 @@ object StepTrackingLogic {
         commitmentEnd: Instant,
         perBucketCap: Int = MAX_STEPS_PER_BUCKET,
         now: Instant = Instant.now()
-    ): Map<Instant, Int> {
-        if (hcCount <= 0 || !recordEnd.isAfter(recordStart)) return emptyMap()
+    ): SubtractAndFillResult {
+        val empty = SubtractAndFillResult(emptyMap(), 0, 0, 0, 0, 0)
+        if (hcCount <= 0 || !recordEnd.isAfter(recordStart)) return empty
 
         // Enumerate all 30s buckets this HC record covers
         val allBuckets = mutableListOf<Instant>()
@@ -152,21 +177,21 @@ object StepTrackingLogic {
             allBuckets.add(cursor)
             cursor = cursor.plusSeconds(30)
         }
-        if (allBuckets.isEmpty()) return emptyMap()
+        if (allBuckets.isEmpty()) return empty
 
         // Clamp to commitment window AND exclude future buckets
         // Only keep buckets in [commitmentStart, min(commitmentEnd, now))
         val inWindowBuckets = allBuckets.filter { bucket ->
             !bucket.isBefore(commitmentStart) && bucket.isBefore(commitmentEnd) && bucket.isBefore(now)
         }
-        if (inWindowBuckets.isEmpty()) return emptyMap()
+        if (inWindowBuckets.isEmpty()) return empty
 
         // Sum phone steps in in-window buckets
-        val phoneTotal = inWindowBuckets.sumOf { existingBuckets[it] ?: 0 }
+        val phoneTotal = inWindowBuckets.sumOf { existingBuckets[it] ?: 0 }.toLong()
 
         // Full inclusion: use entire hcCount, not proportional
         val surplus = max(0L, hcCount - phoneTotal)
-        if (surplus == 0L) return emptyMap()
+        if (surplus == 0L) return SubtractAndFillResult(emptyMap(), phoneTotal, 0, 0, 0, 0)
 
         // Find zero-step in-window buckets
         val zeroBuckets = inWindowBuckets.filter { (existingBuckets[it] ?: 0) == 0 }
@@ -186,7 +211,14 @@ object StepTrackingLogic {
         // If no zero buckets, surplus is discarded — all buckets already have
         // phone sensor data and we can't meaningfully add watch steps on top.
 
-        return result
+        return SubtractAndFillResult(
+            filledBuckets = result,
+            phoneStepsInWindow = phoneTotal,
+            surplus = surplus,
+            zeroBucketsAvailable = zeroBuckets.size,
+            bucketsActuallyFilled = result.size,
+            stepsDistributed = result.values.sum()
+        )
     }
 
     /**
@@ -200,28 +232,47 @@ object StepTrackingLogic {
         commitmentEnd: Instant,
         perBucketCap: Int = MAX_STEPS_PER_BUCKET,
         now: Instant = Instant.now()
-    ): Map<Instant, Int> {
-        if (records.isEmpty()) return emptyMap()
+    ): ProcessHcResult {
+        if (records.isEmpty()) return ProcessHcResult(emptyMap(), emptyMap())
 
         val bySource = records.groupBy { it.dataOrigin }
 
         val result = mutableMapOf<Instant, Int>()
-        for ((_, sourceRecords) in bySource) {
+        val sourceDetails = mutableMapOf<String, SourceFillDetail>()
+
+        for ((origin, sourceRecords) in bySource) {
             val sourceBuckets = mutableMapOf<Instant, Int>()
+            var totalPhoneSteps = 0L
+            var totalSurplus = 0L
+            var totalZeroBuckets = 0
             for (record in sourceRecords) {
-                val filled = subtractAndFill(
+                val safResult = subtractAndFill(
                     record.startTime, record.endTime, record.count,
                     existingBuckets, commitmentStart, commitmentEnd, perBucketCap, now
                 )
-                for ((bucketStart, steps) in filled) {
+                for ((bucketStart, steps) in safResult.filledBuckets) {
                     sourceBuckets[bucketStart] = max(sourceBuckets[bucketStart] ?: 0, steps)
                 }
+                totalPhoneSteps += safResult.phoneStepsInWindow
+                totalSurplus += safResult.surplus
+                totalZeroBuckets += safResult.zeroBucketsAvailable
             }
+
+            sourceDetails[origin] = SourceFillDetail(
+                recordCount = sourceRecords.size,
+                totalHcCount = sourceRecords.sumOf { it.count },
+                phoneStepsInWindow = totalPhoneSteps,
+                surplusComputed = totalSurplus,
+                zeroBucketsAvailable = totalZeroBuckets,
+                bucketsActuallyFilled = sourceBuckets.size,
+                stepsDistributed = sourceBuckets.values.sum()
+            )
+
             for ((bucketStart, steps) in sourceBuckets) {
                 result[bucketStart] = max(result[bucketStart] ?: 0, steps)
             }
         }
-        return result
+        return ProcessHcResult(result, sourceDetails)
     }
 
     /**

@@ -29,9 +29,40 @@ export interface BackfillOptions {
   windows: TrackingWindow[];
 }
 
+export interface BackfillWindowAudit {
+  startAt: string;
+  endAt: string;
+  hcRecords: Array<{
+    recordId: string;
+    startTime: string;
+    endTime: string;
+    count: number;
+    dataOrigin: string;
+    spanSeconds: number;
+  }>;
+  existingBucketCount: number;
+  existingBucketTotalSteps: number;
+  filledBucketCount: number;
+  filledBucketTotalSteps: number;
+  bySource: Record<
+    string,
+    {
+      recordCount: number;
+      totalCount: number;
+      phoneStepsInWindow: number;
+      surplusComputed: number;
+      zeroBucketsAvailable: number;
+      bucketsFilledBySource: number;
+      stepsDistributed: number;
+    }
+  >;
+}
+
 export interface BackfillResult {
   /** false if Health Connect is unavailable or permissions not granted */
   backedUp: boolean;
+  /** Per-window audit data from the native plugin. Present when backedUp is true. */
+  audit?: BackfillWindowAudit[];
 }
 
 export interface ClearDataOptions {
@@ -66,6 +97,39 @@ export interface GetTrackedStepsResult {
 export interface ExactAlarmPermissionResult {
   /** Whether the app can schedule exact alarms. Always true on Android < 12 and on web/iOS. */
   granted: boolean;
+}
+
+export interface TickAuditResult {
+  available: boolean;
+  tickNumber?: number;
+  timestamp?: string;
+  phoneDelta?: number;
+  latestSensorValue?: number;
+  lastSensorBaseline?: number;
+  hcRecordsCount?: number;
+  hcRecords?: Array<{
+    recordId: string;
+    startTime: string;
+    endTime: string;
+    count: number;
+    dataOrigin: string;
+    spanSeconds: number;
+  }>;
+  hcDeltas?: Record<string, number>;
+  existingBucketCount?: number;
+  existingBucketTotalSteps?: number;
+  perOriginDetail?: Record<
+    string,
+    {
+      delta: number;
+      phoneStepsInRange: number;
+      watchSurplus: number;
+      bucketsFilledByOrigin: number;
+      stepsDistributedByOrigin: number;
+    }
+  >;
+  filledBucketCount?: number;
+  filledBucketTotalSteps?: number;
 }
 
 export interface PluginInfoResult {
@@ -150,6 +214,14 @@ export interface StepSensorPlugin {
    * Returns { granted: true } on Android < 12, iOS, and web (no action needed).
    */
   requestExactAlarmPermission(): Promise<ExactAlarmPermissionResult>;
+
+  /**
+   * Returns audit data from the most recent real-time timer tick.
+   * Includes phone sensor delta, HC records, HC deltas, per-origin
+   * surplus calculations, and filled bucket counts.
+   * Returns { available: false } if no tick has occurred yet.
+   */
+  getLastTickAudit(): Promise<TickAuditResult>;
 
   /**
    * Returns build metadata for the plugin. The buildId is a git short hash

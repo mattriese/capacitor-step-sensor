@@ -220,6 +220,8 @@ class StepSensorPlugin : Plugin() {
 
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             try {
+                val auditWindows = JSArray()
+
                 for (window in windows) {
                     val request = ReadRecordsRequest(
                         recordType = StepsRecord::class,
@@ -246,7 +248,19 @@ class StepSensorPlugin : Plugin() {
                             " | origin=${rec.dataOrigin} | spanSeconds=$spanSeconds")
                     }
 
-                    if (hcRecords.isEmpty()) continue
+                    if (hcRecords.isEmpty()) {
+                        auditWindows.put(JSObject().apply {
+                            put("startAt", window.startAt.toString())
+                            put("endAt", window.endAt.toString())
+                            put("hcRecords", JSArray())
+                            put("existingBucketCount", 0)
+                            put("existingBucketTotalSteps", 0)
+                            put("filledBucketCount", 0)
+                            put("filledBucketTotalSteps", 0)
+                            put("bySource", JSObject())
+                        })
+                        continue
+                    }
 
                     val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
 
@@ -256,25 +270,65 @@ class StepSensorPlugin : Plugin() {
                     val existingBuckets = existingRows
                         .associate { Instant.parse(it.bucketStart) to it.steps }
 
-                    val filledBuckets = StepTrackingLogic.processHcRecords(
+                    val processResult = StepTrackingLogic.processHcRecords(
                         hcRecords, existingBuckets, window.startAt, window.endAt,
                         now = Instant.now()
                     )
 
                     Log.d(TAG, "BACKFILL_FILL | existingBuckets=${existingBuckets.size}" +
                         " | existingTotal=${existingBuckets.values.sum()}" +
-                        " | filledBuckets=${filledBuckets.size}" +
-                        " | filledTotal=${filledBuckets.values.sum()}")
+                        " | filledBuckets=${processResult.filledBuckets.size}" +
+                        " | filledTotal=${processResult.filledBuckets.values.sum()}")
 
-                    for ((bucketStart, steps) in filledBuckets) {
+                    for ((bucketStart, steps) in processResult.filledBuckets) {
                         if (steps > 0) {
                             val bucketEnd = bucketStart.plusSeconds(30)
                             database.insertOrUpdate(bucketStart, bucketEnd, steps, hcRecordsJson)
                         }
                     }
+
+                    // Build audit for this window
+                    val hcRecordsAudit = JSArray()
+                    for (rec in hcRecords) {
+                        hcRecordsAudit.put(JSObject().apply {
+                            put("recordId", rec.recordId)
+                            put("startTime", rec.startTime.toString())
+                            put("endTime", rec.endTime.toString())
+                            put("count", rec.count)
+                            put("dataOrigin", rec.dataOrigin)
+                            put("spanSeconds", Duration.between(rec.startTime, rec.endTime).seconds)
+                        })
+                    }
+
+                    val bySourceAudit = JSObject()
+                    for ((origin, detail) in processResult.perSourceDetail) {
+                        bySourceAudit.put(origin, JSObject().apply {
+                            put("recordCount", detail.recordCount)
+                            put("totalCount", detail.totalHcCount)
+                            put("phoneStepsInWindow", detail.phoneStepsInWindow)
+                            put("surplusComputed", detail.surplusComputed)
+                            put("zeroBucketsAvailable", detail.zeroBucketsAvailable)
+                            put("bucketsFilledBySource", detail.bucketsActuallyFilled)
+                            put("stepsDistributed", detail.stepsDistributed)
+                        })
+                    }
+
+                    auditWindows.put(JSObject().apply {
+                        put("startAt", window.startAt.toString())
+                        put("endAt", window.endAt.toString())
+                        put("hcRecords", hcRecordsAudit)
+                        put("existingBucketCount", existingBuckets.size)
+                        put("existingBucketTotalSteps", existingBuckets.values.sum())
+                        put("filledBucketCount", processResult.filledBuckets.size)
+                        put("filledBucketTotalSteps", processResult.filledBuckets.values.sum())
+                        put("bySource", bySourceAudit)
+                    })
                 }
 
-                val result = JSObject().apply { put("backedUp", true) }
+                val result = JSObject().apply {
+                    put("backedUp", true)
+                    put("audit", auditWindows)
+                }
                 call.resolve(result)
             } catch (e: Exception) {
                 Log.e(TAG, "Backfill failed", e)
@@ -340,6 +394,61 @@ class StepSensorPlugin : Plugin() {
             val result = JSObject().apply { put("granted", true) }
             call.resolve(result)
         }
+    }
+
+    @PluginMethod
+    fun getLastTickAudit(call: PluginCall) {
+        val audit = StepCounterService.lastTickAudit
+        if (audit == null) {
+            call.resolve(JSObject().apply { put("available", false) })
+            return
+        }
+
+        val hcRecordsArray = JSArray()
+        for (rec in audit.hcRecords) {
+            hcRecordsArray.put(JSObject().apply {
+                put("recordId", rec.recordId)
+                put("startTime", rec.startTime.toString())
+                put("endTime", rec.endTime.toString())
+                put("count", rec.count)
+                put("dataOrigin", rec.dataOrigin)
+                put("spanSeconds", Duration.between(rec.startTime, rec.endTime).seconds)
+            })
+        }
+
+        val hcDeltasObj = JSObject()
+        for ((origin, delta) in audit.hcDeltas) {
+            hcDeltasObj.put(origin, delta)
+        }
+
+        val perOriginObj = JSObject()
+        for ((origin, detail) in audit.perOriginDetail) {
+            perOriginObj.put(origin, JSObject().apply {
+                put("delta", detail.delta)
+                put("phoneStepsInRange", detail.phoneStepsInRange)
+                put("watchSurplus", detail.watchSurplus)
+                put("bucketsFilledByOrigin", detail.bucketsFilledByOrigin)
+                put("stepsDistributedByOrigin", detail.stepsDistributedByOrigin)
+            })
+        }
+
+        val result = JSObject().apply {
+            put("available", true)
+            put("tickNumber", audit.tickNumber)
+            put("timestamp", audit.timestamp)
+            put("phoneDelta", audit.phoneDelta)
+            put("latestSensorValue", audit.latestSensorValue)
+            put("lastSensorBaseline", audit.lastSensorBaseline)
+            put("hcRecordsCount", audit.hcRecordsCount)
+            put("hcRecords", hcRecordsArray)
+            put("hcDeltas", hcDeltasObj)
+            put("existingBucketCount", audit.existingBucketCount)
+            put("existingBucketTotalSteps", audit.existingBucketTotalSteps)
+            put("perOriginDetail", perOriginObj)
+            put("filledBucketCount", audit.filledBucketCount)
+            put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
+        }
+        call.resolve(result)
     }
 
     @PluginMethod
