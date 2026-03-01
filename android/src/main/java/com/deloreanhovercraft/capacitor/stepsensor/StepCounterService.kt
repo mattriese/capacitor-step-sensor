@@ -53,7 +53,9 @@ data class TickAuditData(
     val existingBucketTotalSteps: Int,
     val perOriginDetail: Map<String, OriginTickDetail>,
     val filledBucketCount: Int,
-    val filledBucketTotalSteps: Int
+    val filledBucketTotalSteps: Int,
+    /** "persisted" if changesToken was restored from SharedPreferences, "fresh" if a new token was fetched */
+    val changesTokenSource: String
 )
 
 class StepCounterService : Service(), SensorEventListener {
@@ -66,6 +68,7 @@ class StepCounterService : Service(), SensorEventListener {
         private const val PREFS_NAME = "step_sensor_service_prefs"
         private const val KEY_NOTIFICATION_TITLE = "notification_title"
         private const val KEY_NOTIFICATION_TEXT = "notification_text"
+        private const val KEY_HC_CHANGES_TOKEN = "hc_changes_token"
 
         @Volatile
         var isRunning = false
@@ -104,6 +107,8 @@ class StepCounterService : Service(), SensorEventListener {
     // Health Connect state (guarded by hcMutex, accessed on IO dispatcher)
     private val hcMutex = Mutex()
     private var changesToken: String? = null
+    /** "persisted" if token was restored from SharedPreferences, "fresh" if newly fetched */
+    private var changesTokenSource: String = "fresh"
 
     // HC delta tracking (in-memory, resets on service restart)
     private val hcDeltaTracker = HcDeltaTracker()
@@ -266,57 +271,102 @@ class StepCounterService : Service(), SensorEventListener {
             return
         }
 
-        // Get initial changes token, then snapshot all existing records as baseline.
-        // Order matters: token FIRST, then snapshot. Any HC changes after the token
-        // is obtained will appear in subsequent getChanges() calls. The snapshot
-        // gives us baseline counts to diff against, so late-appearing records
-        // (e.g., Samsung's daily cumulative record) produce correct small deltas
-        // instead of crediting their entire cumulative count.
+        // Try to restore a persisted changes token to avoid a fresh baseline snapshot
+        // on every service restart. If no token is stored, fall back to fetching a new
+        // token + a 48h baseline snapshot (original behavior).
+        //
+        // Order matters for the fresh-token path: token FIRST, then snapshot.
+        // Any HC changes after the token is obtained will appear in subsequent
+        // getChanges() calls. The snapshot gives us baseline counts to diff against,
+        // so late-appearing records (e.g. Samsung's daily cumulative record) produce
+        // correct small deltas instead of crediting their entire cumulative count.
         scope.launch {
             hcMutex.withLock {
                 try {
                     val client = healthConnectClient!!
-                    changesToken = client.getChangesToken(
-                        ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
-                    )
+                    val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    val storedToken = prefs.getString(KEY_HC_CHANGES_TOKEN, null)
 
-                    // Snapshot all existing step records to establish baselines
-                    val now = Instant.now()
-                    val snapshot = client.readRecords(
-                        ReadRecordsRequest(
-                            StepsRecord::class,
-                            timeRangeFilter = TimeRangeFilter.between(
-                                now.minus(Duration.ofHours(48)), now
-                            )
-                        )
-                    )
-
-                    if (snapshot.records.isNotEmpty()) {
-                        val baselineRecords = snapshot.records.map { sr ->
-                            HcStepRecord(
-                                recordId = sr.metadata.id,
-                                startTime = sr.startTime,
-                                endTime = sr.endTime,
-                                count = sr.count,
-                                dataOrigin = sr.metadata.dataOrigin.packageName
-                            )
+                    if (storedToken != null) {
+                        // Validate the stored token before trusting it
+                        try {
+                            val testResponse = client.getChanges(storedToken)
+                            if (testResponse.changesTokenExpired) {
+                                // Token expired — fall through to fresh init
+                                Log.w(TAG, "Persisted HC changes token expired, fetching new one")
+                                initFreshChangesToken(client, prefs)
+                            } else {
+                                // Token is valid — restore it and advance to the latest token
+                                // (consuming any changes that occurred while service was stopped)
+                                changesToken = testResponse.nextChangesToken
+                                changesTokenSource = "persisted"
+                                saveChangesToken(prefs, changesToken!!)
+                                val changeCount = testResponse.changes.size
+                                Log.d(TAG, "HC changes token restored from SharedPreferences" +
+                                    " | changesWhileStopped=$changeCount" +
+                                    " | nextToken=${changesToken?.take(20)}...")
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Stored HC token validation failed, fetching fresh token", e)
+                            initFreshChangesToken(client, prefs)
                         }
-                        hcDeltaTracker.computeDeltas(baselineRecords)
-                        hcDeltaTracker.markProcessed(now)
-                        Log.d(TAG, "HC baseline snapshot: ${baselineRecords.size} records" +
-                            " | origins=${baselineRecords.map { it.dataOrigin }.toSet()}")
                     } else {
-                        Log.d(TAG, "HC baseline snapshot: no records found, " +
-                            "first timer tick will establish baselines")
+                        initFreshChangesToken(client, prefs)
                     }
 
-                    Log.d(TAG, "Health Connect poller initialized")
+                    Log.d(TAG, "Health Connect poller initialized | tokenSource=$changesTokenSource")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to initialize Health Connect poller", e)
                     healthConnectClient = null
                 }
             }
         }
+    }
+
+    /** Fetch a fresh HC changes token and take a 48h baseline snapshot. */
+    private suspend fun initFreshChangesToken(
+        client: HealthConnectClient,
+        prefs: android.content.SharedPreferences
+    ) {
+        changesToken = client.getChangesToken(
+            ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
+        )
+        changesTokenSource = "fresh"
+        saveChangesToken(prefs, changesToken!!)
+
+        // Snapshot all existing step records to establish delta baselines.
+        val now = Instant.now()
+        val snapshot = client.readRecords(
+            ReadRecordsRequest(
+                StepsRecord::class,
+                timeRangeFilter = TimeRangeFilter.between(
+                    now.minus(Duration.ofHours(48)), now
+                )
+            )
+        )
+
+        if (snapshot.records.isNotEmpty()) {
+            val baselineRecords = snapshot.records.map { sr ->
+                HcStepRecord(
+                    recordId = sr.metadata.id,
+                    startTime = sr.startTime,
+                    endTime = sr.endTime,
+                    count = sr.count,
+                    dataOrigin = sr.metadata.dataOrigin.packageName
+                )
+            }
+            hcDeltaTracker.computeDeltas(baselineRecords)
+            hcDeltaTracker.markProcessed(now)
+            Log.d(TAG, "HC fresh init: baseline snapshot=${baselineRecords.size} records" +
+                " | origins=${baselineRecords.map { it.dataOrigin }.toSet()}")
+        } else {
+            Log.d(TAG, "HC fresh init: no records in 48h window, " +
+                "first timer tick will establish baselines")
+        }
+    }
+
+    private fun saveChangesToken(prefs: android.content.SharedPreferences, token: String) {
+        prefs.edit().putString(KEY_HC_CHANGES_TOKEN, token).apply()
     }
 
     private suspend fun collectHcRecords(): List<HcStepRecord> {
@@ -334,6 +384,7 @@ class StepCounterService : Service(), SensorEventListener {
             val token = changesToken!!
             val records = mutableListOf<HcStepRecord>()
 
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             try {
                 var nextToken = token
 
@@ -342,9 +393,13 @@ class StepCounterService : Service(), SensorEventListener {
 
                     if (response.changesTokenExpired) {
                         Log.w(TAG, "Health Connect changes token expired, re-initializing")
-                        changesToken = client.getChangesToken(
+                        val newToken = client.getChangesToken(
                             ChangesTokenRequest(recordTypes = setOf(StepsRecord::class))
                         )
+                        changesToken = newToken
+                        changesTokenSource = "fresh"
+                        // Clear the stored token so next service start also refreshes
+                        prefs.edit().remove(KEY_HC_CHANGES_TOKEN).apply()
                         return@withLock emptyList()
                     }
 
@@ -366,6 +421,8 @@ class StepCounterService : Service(), SensorEventListener {
                 } while (response.hasMore)
 
                 changesToken = nextToken
+                // Persist the advanced token after each successful collection
+                saveChangesToken(prefs, nextToken)
                 records
             } catch (e: Exception) {
                 Log.e(TAG, "Error collecting Health Connect records", e)
@@ -432,7 +489,8 @@ class StepCounterService : Service(), SensorEventListener {
                     existingBucketTotalSteps = 0,
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
-                    filledBucketTotalSteps = 0
+                    filledBucketTotalSteps = 0,
+                    changesTokenSource = changesTokenSource
                 )
                 return@launch
             }
@@ -458,7 +516,8 @@ class StepCounterService : Service(), SensorEventListener {
                     existingBucketTotalSteps = 0,
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
-                    filledBucketTotalSteps = 0
+                    filledBucketTotalSteps = 0,
+                    changesTokenSource = changesTokenSource
                 )
                 return@launch
             }
@@ -479,7 +538,8 @@ class StepCounterService : Service(), SensorEventListener {
                     existingBucketTotalSteps = 0,
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
-                    filledBucketTotalSteps = 0
+                    filledBucketTotalSteps = 0,
+                    changesTokenSource = changesTokenSource
                 )
                 return@launch
             }
@@ -562,7 +622,8 @@ class StepCounterService : Service(), SensorEventListener {
                 existingBucketTotalSteps = existingBuckets.values.sum(),
                 perOriginDetail = originDetails,
                 filledBucketCount = allFilledBuckets.size,
-                filledBucketTotalSteps = allFilledBuckets.values.sum()
+                filledBucketTotalSteps = allFilledBuckets.values.sum(),
+                changesTokenSource = changesTokenSource
             )
 
             hcDeltaTracker.markProcessed(now)

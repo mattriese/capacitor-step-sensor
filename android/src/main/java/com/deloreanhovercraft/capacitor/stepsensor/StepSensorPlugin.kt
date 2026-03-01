@@ -447,6 +447,7 @@ class StepSensorPlugin : Plugin() {
             put("perOriginDetail", perOriginObj)
             put("filledBucketCount", audit.filledBucketCount)
             put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
+            put("changesTokenSource", audit.changesTokenSource)
         }
         call.resolve(result)
     }

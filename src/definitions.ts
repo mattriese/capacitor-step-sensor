@@ -130,6 +130,12 @@ export interface TickAuditResult {
   >;
   filledBucketCount?: number;
   filledBucketTotalSteps?: number;
+  /**
+   * Whether the HC changes token was restored from SharedPreferences ("persisted")
+   * or freshly fetched on service start ("fresh"). A "fresh" source means the
+   * service restarted without a valid stored token and took a 48h baseline snapshot.
+   */
+  changesTokenSource?: 'persisted' | 'fresh';
 }
 
 export interface PluginInfoResult {
