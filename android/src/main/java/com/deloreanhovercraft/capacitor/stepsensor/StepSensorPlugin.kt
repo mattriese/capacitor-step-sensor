@@ -453,6 +453,54 @@ class StepSensorPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun getTickAuditHistory(call: PluginCall) {
+        val history: List<TickAuditData>
+        synchronized(StepCounterService.tickAuditHistory) {
+            history = StepCounterService.tickAuditHistory.toList()
+        }
+
+        val ticksArray = JSArray()
+        for (audit in history) {
+            val hcDeltasObj = JSObject()
+            for ((origin, delta) in audit.hcDeltas) {
+                hcDeltasObj.put(origin, delta)
+            }
+
+            val perOriginObj = JSObject()
+            for ((origin, detail) in audit.perOriginDetail) {
+                perOriginObj.put(origin, JSObject().apply {
+                    put("delta", detail.delta)
+                    put("phoneStepsInRange", detail.phoneStepsInRange)
+                    put("watchSurplus", detail.watchSurplus)
+                    put("bucketsFilledByOrigin", detail.bucketsFilledByOrigin)
+                    put("stepsDistributedByOrigin", detail.stepsDistributedByOrigin)
+                })
+            }
+
+            ticksArray.put(JSObject().apply {
+                put("tickNumber", audit.tickNumber)
+                put("timestamp", audit.timestamp)
+                put("phoneDelta", audit.phoneDelta)
+                put("hcRecordsCount", audit.hcRecordsCount)
+                put("hcDeltas", hcDeltasObj)
+                put("existingBucketCount", audit.existingBucketCount)
+                put("existingBucketTotalSteps", audit.existingBucketTotalSteps)
+                put("perOriginDetail", perOriginObj)
+                put("filledBucketCount", audit.filledBucketCount)
+                put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
+                put("changesTokenSource", audit.changesTokenSource)
+            })
+        }
+
+        val result = JSObject().apply {
+            put("ticks", ticksArray)
+            put("anomalousTickCount", StepCounterService.anomalousTickCount)
+            put("bufferSize", StepCounterService.tickAuditHistory.size)
+        }
+        call.resolve(result)
+    }
+
+    @PluginMethod
     fun getPluginInfo(call: PluginCall) {
         val result = JSObject().apply {
             put("buildId", PluginBuildInfo.BUILD_ID)

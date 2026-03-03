@@ -1,6 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { BackfillResult, ExactAlarmPermissionResult, PluginInfoResult, StepSensorPermissionStatus, StepSensorPlugin, TickAuditResult } from './definitions';
+import type { BackfillResult, ExactAlarmPermissionResult, PluginInfoResult, StepSensorPermissionStatus, StepSensorPlugin, TickAuditHistoryResult, TickAuditResult } from './definitions';
 
 export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
   async scheduleStepTracking(): Promise<void> {
@@ -40,6 +40,10 @@ export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
 
   async getLastTickAudit(): Promise<TickAuditResult> {
     return { available: false };
+  }
+
+  async getTickAuditHistory(): Promise<TickAuditHistoryResult> {
+    return { ticks: [], anomalousTickCount: 0, bufferSize: 0 };
   }
 
   async getPluginInfo(): Promise<PluginInfoResult> {

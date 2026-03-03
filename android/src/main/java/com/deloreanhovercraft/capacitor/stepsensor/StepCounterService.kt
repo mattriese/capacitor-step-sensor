@@ -78,6 +78,14 @@ class StepCounterService : Service(), SensorEventListener {
         var lastTickAudit: TickAuditData? = null
             private set
 
+        /** Ring buffer of recent tick audits for debugging. Capacity = TICK_AUDIT_BUFFER_SIZE. */
+        private const val TICK_AUDIT_BUFFER_SIZE = 20
+        val tickAuditHistory: MutableList<TickAuditData> = mutableListOf()
+        /** Count of ticks where any single bucket write exceeded MAX_STEPS_PER_BUCKET. */
+        @Volatile
+        var anomalousTickCount: Int = 0
+            private set
+
         /**
          * Store notification config before starting the service
          * (since extras may not be available when started from alarm receiver)
@@ -112,6 +120,9 @@ class StepCounterService : Service(), SensorEventListener {
 
     // HC delta tracking (in-memory, resets on service restart)
     private val hcDeltaTracker = HcDeltaTracker()
+
+    // Time of last tick — used to distribute phone delta across elapsed buckets
+    private var lastTickTime: Instant? = null
 
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -443,6 +454,16 @@ class StepCounterService : Service(), SensorEventListener {
 
     private var tickCount = 0L
 
+    private fun recordTickAudit(audit: TickAuditData) {
+        lastTickAudit = audit
+        synchronized(tickAuditHistory) {
+            tickAuditHistory.add(audit)
+            while (tickAuditHistory.size > TICK_AUDIT_BUFFER_SIZE) {
+                tickAuditHistory.removeAt(0)
+            }
+        }
+    }
+
     private fun onTimerTick() {
         tickCount++
         val phoneDelta = recordPhoneSensorInterval()
@@ -451,12 +472,24 @@ class StepCounterService : Service(), SensorEventListener {
 
         scope.launch {
             val now = Instant.now()
-            val (currentBucketStart, currentBucketEnd) = StepTrackingLogic.computeBucketBoundaries(now)
 
-            // Always write phone data first — it's real-time and per-bucket accurate
+            // Distribute phone delta across elapsed buckets instead of dumping
+            // into a single bucket. Prevents >90 step buckets when tick timer
+            // is delayed by Doze mode or system scheduling.
             if (phoneDelta > 0) {
-                database.insertOrUpdate(currentBucketStart, currentBucketEnd, phoneDelta.toInt())
+                val distributed = StepTrackingLogic.distributePhoneDelta(
+                    phoneDelta, lastTickTime, now
+                )
+                for ((bucketStart, steps) in distributed) {
+                    val bucketEnd = bucketStart.plusSeconds(30)
+                    database.insertOrUpdate(bucketStart, bucketEnd, steps)
+                }
+                if (distributed.values.any { it > StepTrackingLogic.MAX_STEPS_PER_BUCKET }) {
+                    anomalousTickCount++
+                    Log.w(TAG, "ANOMALY | phoneDelta=$phoneDelta exceeded cap in ${distributed.size} buckets")
+                }
             }
+            lastTickTime = now
 
             val hcRecords = collectHcRecords()
 
@@ -476,7 +509,7 @@ class StepCounterService : Service(), SensorEventListener {
             }
 
             if (hcRecords.isEmpty()) {
-                lastTickAudit = TickAuditData(
+                recordTickAudit(TickAuditData(
                     tickNumber = tickCount,
                     timestamp = now.toString(),
                     phoneDelta = phoneDelta,
@@ -491,7 +524,7 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource
-                )
+                ))
                 return@launch
             }
 
@@ -503,7 +536,7 @@ class StepCounterService : Service(), SensorEventListener {
                 Log.d(TAG, "HC_DELTA | Baseline established | records=${hcRecords.size}" +
                     " | origins=${deltas.keys}")
                 hcDeltaTracker.markProcessed(now)
-                lastTickAudit = TickAuditData(
+                recordTickAudit(TickAuditData(
                     tickNumber = tickCount,
                     timestamp = now.toString(),
                     phoneDelta = phoneDelta,
@@ -518,14 +551,14 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource
-                )
+                ))
                 return@launch
             }
 
             val totalDelta = deltas.values.sum()
             if (totalDelta == 0L) {
                 Log.d(TAG, "HC_DELTA | No new steps | deltas=$deltas")
-                lastTickAudit = TickAuditData(
+                recordTickAudit(TickAuditData(
                     tickNumber = tickCount,
                     timestamp = now.toString(),
                     phoneDelta = phoneDelta,
@@ -540,7 +573,7 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource
-                )
+                ))
                 return@launch
             }
 
@@ -609,7 +642,14 @@ class StepCounterService : Service(), SensorEventListener {
                 }
             }
 
-            lastTickAudit = TickAuditData(
+            // Check for anomalous HC fills
+            if (allFilledBuckets.values.any { it > StepTrackingLogic.MAX_STEPS_PER_BUCKET }) {
+                anomalousTickCount++
+                Log.w(TAG, "ANOMALY | HC fill produced >90 step bucket | " +
+                    "filled=${allFilledBuckets.entries.filter { it.value > StepTrackingLogic.MAX_STEPS_PER_BUCKET }}")
+            }
+
+            recordTickAudit(TickAuditData(
                 tickNumber = tickCount,
                 timestamp = now.toString(),
                 phoneDelta = phoneDelta,
@@ -624,7 +664,7 @@ class StepCounterService : Service(), SensorEventListener {
                 filledBucketCount = allFilledBuckets.size,
                 filledBucketTotalSteps = allFilledBuckets.values.sum(),
                 changesTokenSource = changesTokenSource
-            )
+            ))
 
             hcDeltaTracker.markProcessed(now)
         }

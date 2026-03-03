@@ -1090,4 +1090,79 @@ class StepTrackingLogicTest {
         assertEquals(3, result[Instant.parse("2026-01-15T10:00:30Z")])
         assertEquals(3, result[Instant.parse("2026-01-15T10:01:00Z")])
     }
+
+    // --- distributePhoneDelta ---
+
+    @Test
+    fun `distributePhoneDelta - zero delta returns empty`() {
+        val result = StepTrackingLogic.distributePhoneDelta(
+            0L,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:00:30Z")
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `distributePhoneDelta - small delta within one bucket goes to current bucket`() {
+        val now = Instant.parse("2026-01-15T10:00:45Z")
+        val lastTick = Instant.parse("2026-01-15T10:00:15Z")
+        val result = StepTrackingLogic.distributePhoneDelta(11L, lastTick, now)
+        // computeBucketBoundaries(10:00:45): floor=10:00:30, start=10:00:00
+        // lastTick floors to 10:00:00, same as currentBucketStart → fast path
+        assertEquals(1, result.size)
+        assertEquals(11, result[Instant.parse("2026-01-15T10:00:00Z")])
+    }
+
+    @Test
+    fun `distributePhoneDelta - large delta across multiple buckets is distributed and capped`() {
+        // 302 steps over 5 minutes (10 buckets) = 30.2 per bucket, well under cap
+        val now = Instant.parse("2026-01-15T10:05:15Z")
+        val lastTick = Instant.parse("2026-01-15T10:00:15Z")
+        val result = StepTrackingLogic.distributePhoneDelta(302L, lastTick, now)
+        // Buckets from 10:00:00 to 10:05:00 = 11 buckets
+        assertTrue(result.size > 1)
+        // No bucket should exceed 90
+        assertTrue(result.values.all { it <= 90 })
+        // Total should equal 302
+        assertEquals(302, result.values.sum())
+    }
+
+    @Test
+    fun `distributePhoneDelta - massive delta is capped per bucket`() {
+        // 500 steps in 2 buckets (60s interval) = 250 each without cap
+        // With cap of 90, total = 180
+        val now = Instant.parse("2026-01-15T10:01:15Z")
+        val lastTick = Instant.parse("2026-01-15T10:00:15Z")
+        val result = StepTrackingLogic.distributePhoneDelta(500L, lastTick, now)
+        assertTrue(result.values.all { it <= 90 })
+    }
+
+    @Test
+    fun `distributePhoneDelta - null lastTickTime defaults to single bucket`() {
+        val now = Instant.parse("2026-01-15T10:00:45Z")
+        val result = StepTrackingLogic.distributePhoneDelta(50L, null, now)
+        // First tick: falls back to now - 30s, so one bucket
+        assertEquals(1, result.size)
+        assertEquals(50, result.values.first())
+    }
+
+    @Test
+    fun `distributePhoneDelta - normal 30s interval writes to single bucket`() {
+        val now = Instant.parse("2026-01-15T10:01:05Z")
+        val lastTick = Instant.parse("2026-01-15T10:00:35Z")
+        val result = StepTrackingLogic.distributePhoneDelta(25L, lastTick, now)
+        assertEquals(1, result.size)
+        assertEquals(25, result.values.first())
+    }
+
+    @Test
+    fun `distributePhoneDelta - remainder distributed to first buckets`() {
+        // 10 steps across 3 buckets = 3 per bucket + 1 for first bucket
+        val now = Instant.parse("2026-01-15T10:01:35Z")
+        val lastTick = Instant.parse("2026-01-15T10:00:05Z")
+        val result = StepTrackingLogic.distributePhoneDelta(10L, lastTick, now)
+        assertTrue(result.size >= 2)
+        assertEquals(10, result.values.sum())
+    }
 }

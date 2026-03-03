@@ -268,6 +268,7 @@ Even when Kotlin source files change on disk, Gradle may use cached compiled `.c
 * [`checkExactAlarmPermission()`](#checkexactalarmpermission)
 * [`requestExactAlarmPermission()`](#requestexactalarmpermission)
 * [`getLastTickAudit()`](#getlasttickaudit)
+* [`getTickAuditHistory()`](#gettickaudithistory)
 * [`getPluginInfo()`](#getplugininfo)
 * [`checkPermissions()`](#checkpermissions)
 * [`requestPermissions()`](#requestpermissions)
@@ -437,6 +438,22 @@ surplus calculations, and filled bucket counts.
 Returns { available: false } if no tick has occurred yet.
 
 **Returns:** <code>Promise&lt;<a href="#tickauditresult">TickAuditResult</a>&gt;</code>
+
+--------------------
+
+
+### getTickAuditHistory()
+
+```typescript
+getTickAuditHistory() => Promise<TickAuditHistoryResult>
+```
+
+Returns a ring buffer of recent tick audits (up to 20 ticks = ~10 minutes).
+Includes anomalousTickCount for ticks where any bucket write exceeded 90 steps.
+Use this for multi-tick analysis instead of getLastTickAudit which only
+returns the single most recent tick.
+
+**Returns:** <code>Promise&lt;<a href="#tickaudithistoryresult">TickAuditHistoryResult</a>&gt;</code>
 
 --------------------
 
@@ -634,22 +651,49 @@ Returns the updated grant status after the user responds to the prompt.
 
 #### TickAuditResult
 
+| Prop                           | Type                                                                                                                                                                                            | Description                                                                                                                                                                                                                               |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`available`**                | <code>boolean</code>                                                                                                                                                                            |                                                                                                                                                                                                                                           |
+| **`tickNumber`**               | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`timestamp`**                | <code>string</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`phoneDelta`**               | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`latestSensorValue`**        | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`lastSensorBaseline`**       | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`hcRecordsCount`**           | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`hcRecords`**                | <code><a href="#array">Array</a>&lt;{ recordId: string; startTime: string; endTime: string; count: number; dataOrigin: string; spanSeconds: number; }&gt;</code>                                |                                                                                                                                                                                                                                           |
+| **`hcDeltas`**                 | <code><a href="#record">Record</a>&lt;string, number&gt;</code>                                                                                                                                 |                                                                                                                                                                                                                                           |
+| **`existingBucketCount`**      | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`existingBucketTotalSteps`** | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`perOriginDetail`**          | <code><a href="#record">Record</a>&lt; string, { delta: number; phoneStepsInRange: number; watchSurplus: number; bucketsFilledByOrigin: number; stepsDistributedByOrigin: number; } &gt;</code> |                                                                                                                                                                                                                                           |
+| **`filledBucketCount`**        | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`filledBucketTotalSteps`**   | <code>number</code>                                                                                                                                                                             |                                                                                                                                                                                                                                           |
+| **`changesTokenSource`**       | <code>'persisted' \| 'fresh'</code>                                                                                                                                                             | Whether the HC changes token was restored from SharedPreferences ("persisted") or freshly fetched on service start ("fresh"). A "fresh" source means the service restarted without a valid stored token and took a 48h baseline snapshot. |
+
+
+#### TickAuditHistoryResult
+
+| Prop                     | Type                                 | Description                                               |
+| ------------------------ | ------------------------------------ | --------------------------------------------------------- |
+| **`ticks`**              | <code>TickAuditHistoryEntry[]</code> | Recent tick audits (ring buffer, most recent last).       |
+| **`anomalousTickCount`** | <code>number</code>                  | Number of ticks where any bucket write exceeded 90 steps. |
+| **`bufferSize`**         | <code>number</code>                  | Current buffer size (max 20).                             |
+
+
+#### TickAuditHistoryEntry
+
 | Prop                           | Type                                                                                                                                                                                            |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`available`**                | <code>boolean</code>                                                                                                                                                                            |
 | **`tickNumber`**               | <code>number</code>                                                                                                                                                                             |
 | **`timestamp`**                | <code>string</code>                                                                                                                                                                             |
 | **`phoneDelta`**               | <code>number</code>                                                                                                                                                                             |
-| **`latestSensorValue`**        | <code>number</code>                                                                                                                                                                             |
-| **`lastSensorBaseline`**       | <code>number</code>                                                                                                                                                                             |
 | **`hcRecordsCount`**           | <code>number</code>                                                                                                                                                                             |
-| **`hcRecords`**                | <code><a href="#array">Array</a>&lt;{ recordId: string; startTime: string; endTime: string; count: number; dataOrigin: string; spanSeconds: number; }&gt;</code>                                |
 | **`hcDeltas`**                 | <code><a href="#record">Record</a>&lt;string, number&gt;</code>                                                                                                                                 |
 | **`existingBucketCount`**      | <code>number</code>                                                                                                                                                                             |
 | **`existingBucketTotalSteps`** | <code>number</code>                                                                                                                                                                             |
 | **`perOriginDetail`**          | <code><a href="#record">Record</a>&lt; string, { delta: number; phoneStepsInRange: number; watchSurplus: number; bucketsFilledByOrigin: number; stepsDistributedByOrigin: number; } &gt;</code> |
 | **`filledBucketCount`**        | <code>number</code>                                                                                                                                                                             |
 | **`filledBucketTotalSteps`**   | <code>number</code>                                                                                                                                                                             |
+| **`changesTokenSource`**       | <code>'persisted' \| 'fresh'</code>                                                                                                                                                             |
 
 
 #### PluginInfoResult

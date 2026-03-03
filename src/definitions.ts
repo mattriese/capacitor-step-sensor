@@ -138,6 +138,38 @@ export interface TickAuditResult {
   changesTokenSource?: 'persisted' | 'fresh';
 }
 
+export interface TickAuditHistoryEntry {
+  tickNumber: number;
+  timestamp: string;
+  phoneDelta: number;
+  hcRecordsCount: number;
+  hcDeltas: Record<string, number>;
+  existingBucketCount: number;
+  existingBucketTotalSteps: number;
+  perOriginDetail: Record<
+    string,
+    {
+      delta: number;
+      phoneStepsInRange: number;
+      watchSurplus: number;
+      bucketsFilledByOrigin: number;
+      stepsDistributedByOrigin: number;
+    }
+  >;
+  filledBucketCount: number;
+  filledBucketTotalSteps: number;
+  changesTokenSource: 'persisted' | 'fresh';
+}
+
+export interface TickAuditHistoryResult {
+  /** Recent tick audits (ring buffer, most recent last). */
+  ticks: TickAuditHistoryEntry[];
+  /** Number of ticks where any bucket write exceeded 90 steps. */
+  anomalousTickCount: number;
+  /** Current buffer size (max 20). */
+  bufferSize: number;
+}
+
 export interface PluginInfoResult {
   /** Git short hash stamped at yalc push time, or "dev" if built without the push script. */
   buildId: string;
@@ -228,6 +260,14 @@ export interface StepSensorPlugin {
    * Returns { available: false } if no tick has occurred yet.
    */
   getLastTickAudit(): Promise<TickAuditResult>;
+
+  /**
+   * Returns a ring buffer of recent tick audits (up to 20 ticks = ~10 minutes).
+   * Includes anomalousTickCount for ticks where any bucket write exceeded 90 steps.
+   * Use this for multi-tick analysis instead of getLastTickAudit which only
+   * returns the single most recent tick.
+   */
+  getTickAuditHistory(): Promise<TickAuditHistoryResult>;
 
   /**
    * Returns build metadata for the plugin. The buildId is a git short hash

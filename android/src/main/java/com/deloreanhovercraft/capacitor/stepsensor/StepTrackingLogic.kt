@@ -351,6 +351,70 @@ object StepTrackingLogic {
         return result
     }
 
+    /**
+     * Distribute phone sensor delta across the elapsed 30-second buckets since
+     * the last tick. Prevents dumping a large accumulated delta into a single
+     * bucket when the tick timer is delayed (Doze mode, etc.).
+     *
+     * Each bucket receives at most perBucketCap steps. If the total delta exceeds
+     * the combined capacity of all elapsed buckets, the excess is discarded
+     * (same policy as HC surplus — physiologically implausible for the time window).
+     *
+     * @param phoneDelta Total phone sensor steps since last tick
+     * @param lastTickTime When the previous tick occurred (null = first tick)
+     * @param now Current time
+     * @param perBucketCap Max steps per 30s bucket (default: MAX_STEPS_PER_BUCKET)
+     * @return Map of bucketStart → steps to write for each bucket
+     */
+    fun distributePhoneDelta(
+        phoneDelta: Long,
+        lastTickTime: Instant?,
+        now: Instant,
+        perBucketCap: Int = MAX_STEPS_PER_BUCKET
+    ): Map<Instant, Int> {
+        if (phoneDelta <= 0) return emptyMap()
+
+        val (currentBucketStart, _) = computeBucketBoundaries(now)
+
+        // If delta fits in one bucket and it's a normal interval, fast path
+        if (phoneDelta <= perBucketCap && (lastTickTime == null ||
+                !currentBucketStart.isAfter(floorTo30Seconds(lastTickTime)))) {
+            return mapOf(currentBucketStart to phoneDelta.toInt())
+        }
+
+        // Determine the time range the phone delta covers
+        val rangeStart = lastTickTime ?: now.minusSeconds(30)
+        val rangeEnd = now
+
+        // Enumerate 30s buckets in [floor(rangeStart), floor(now))
+        // Include the current bucket boundary
+        val buckets = mutableListOf<Instant>()
+        var cursor = floorTo30Seconds(rangeStart)
+        val bucketEnd = floorTo30Seconds(rangeEnd)
+        while (!cursor.isAfter(bucketEnd)) {
+            buckets.add(cursor)
+            cursor = cursor.plusSeconds(30)
+        }
+        if (buckets.isEmpty()) {
+            return mapOf(currentBucketStart to min(phoneDelta, perBucketCap.toLong()).toInt())
+        }
+
+        // Distribute evenly, capped per bucket
+        val totalCapacity = buckets.size.toLong() * perBucketCap
+        val clampedDelta = minOf(phoneDelta, totalCapacity)
+        val perBucket = (clampedDelta / buckets.size).toInt()
+        val remainder = (clampedDelta % buckets.size).toInt()
+
+        val result = mutableMapOf<Instant, Int>()
+        for ((i, bucket) in buckets.withIndex()) {
+            val steps = perBucket + if (i < remainder) 1 else 0
+            if (steps > 0) {
+                result[bucket] = steps
+            }
+        }
+        return result
+    }
+
     fun serializeHcRecords(records: List<HcStepRecord>): String {
         val jsonArray = JSONArray()
         for (record in records) {
