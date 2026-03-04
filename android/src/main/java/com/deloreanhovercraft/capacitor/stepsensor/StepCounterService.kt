@@ -582,8 +582,13 @@ class StepCounterService : Service(), SensorEventListener {
 
             val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
 
-            // Read existing bucket data for [lastProcessTime, now)
-            val existingRows = database.getStepsSince(lastProcessTime)
+            // Read existing bucket data for [lastProcessTime, now).
+            // Floor lastProcessTime to a 30-second boundary so the query captures
+            // the current tick's phone bucket. Without this, lastProcessTime at e.g.
+            // 23:40:01.567Z would miss a phone bucket at 23:40:00Z because
+            // bucket_start (23:40:00) < lastProcessTime (23:40:01.567).
+            val queryFrom = StepTrackingLogic.floorTo30Seconds(lastProcessTime)
+            val existingRows = database.getStepsSince(queryFrom)
             val existingBuckets = existingRows
                 .filter { Instant.parse(it.bucketStart).isBefore(now) }
                 .associate { Instant.parse(it.bucketStart) to it.steps }
@@ -594,6 +599,15 @@ class StepCounterService : Service(), SensorEventListener {
             for ((origin, delta) in deltas) {
                 if (delta <= 0) {
                     originDetails[origin] = OriginTickDetail(delta, 0.0, 0, 0, 0)
+                    continue
+                }
+
+                // Skip the phone's own pedometer HC origin — TYPE_STEP_COUNTER
+                // already captures these steps directly. Distributing surplus from
+                // the "android" origin double-counts the same physical sensor.
+                if (origin == "android") {
+                    originDetails[origin] = OriginTickDetail(delta, 0.0, 0, 0, 0)
+                    Log.d(TAG, "HC_DELTA | SKIP origin=$origin (phone pedometer) | delta=$delta")
                     continue
                 }
 

@@ -241,6 +241,22 @@ object StepTrackingLogic {
         val sourceDetails = mutableMapOf<String, SourceFillDetail>()
 
         for ((origin, sourceRecords) in bySource) {
+            // Skip the phone's own pedometer HC origin — TYPE_STEP_COUNTER
+            // already captures these steps directly via the native sensor listener.
+            // Distributing surplus from the "android" origin double-counts.
+            if (origin == "android") {
+                sourceDetails[origin] = SourceFillDetail(
+                    recordCount = sourceRecords.size,
+                    totalHcCount = sourceRecords.sumOf { it.count },
+                    phoneStepsInWindow = 0,
+                    surplusComputed = 0,
+                    zeroBucketsAvailable = 0,
+                    bucketsActuallyFilled = 0,
+                    stepsDistributed = 0
+                )
+                continue
+            }
+
             val sourceBuckets = mutableMapOf<Instant, Int>()
             var totalPhoneSteps = 0L
             var totalSurplus = 0L

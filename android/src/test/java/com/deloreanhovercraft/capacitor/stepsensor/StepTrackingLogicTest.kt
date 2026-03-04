@@ -846,13 +846,13 @@ class StepTrackingLogicTest {
             HcStepRecord(
                 "", Instant.parse("2026-01-15T10:00:00Z"),
                 Instant.parse("2026-01-15T10:01:00Z"),
-                60, "android"
+                60, "com.sec.android.app.shealth"
             )
         )
         val processResult = StepTrackingLogic.processHcRecords(
             records, existing, wideCommitmentStart, wideCommitmentEnd, now = farFutureNow
         )
-        val detail = processResult.perSourceDetail["android"]!!
+        val detail = processResult.perSourceDetail["com.sec.android.app.shealth"]!!
         assertEquals(20L, detail.phoneStepsInWindow)
         assertEquals(40L, detail.surplusComputed)
         assertEquals(1, detail.bucketsActuallyFilled) // only 1 zero bucket
@@ -1164,5 +1164,62 @@ class StepTrackingLogicTest {
         val result = StepTrackingLogic.distributePhoneDelta(10L, lastTick, now)
         assertTrue(result.size >= 2)
         assertEquals(10, result.values.sum())
+    }
+
+    // --- processHcRecords: android origin skip ---
+
+    @Test
+    fun `processHcRecords - android origin is skipped in surplus distribution`() {
+        // The "android" HC origin is the phone's own pedometer writing to HC.
+        // TYPE_STEP_COUNTER already captures these steps — surplus from "android"
+        // would double-count the same physical sensor.
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 0,
+            Instant.parse("2026-01-15T10:00:30Z") to 0
+        )
+        val records = listOf(
+            HcStepRecord("r1", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:01:00Z"), 100, "android")
+        )
+        val result = StepTrackingLogic.processHcRecords(
+            records, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            now = farFutureNow
+        )
+        // No buckets should be filled — android origin is skipped
+        assertTrue(result.filledBuckets.isEmpty())
+        // But the source detail should still be present (for audit logging)
+        val detail = result.perSourceDetail["android"]
+        assertNotNull(detail)
+        assertEquals(1, detail!!.recordCount)
+        assertEquals(100L, detail.totalHcCount)
+        assertEquals(0, detail.stepsDistributed)
+    }
+
+    @Test
+    fun `processHcRecords - android origin skipped but shealth origin still processed`() {
+        val existing = mapOf(
+            Instant.parse("2026-01-15T10:00:00Z") to 0,
+            Instant.parse("2026-01-15T10:00:30Z") to 0
+        )
+        val records = listOf(
+            HcStepRecord("r1", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:01:00Z"), 100, "android"),
+            HcStepRecord("r2", Instant.parse("2026-01-15T10:00:00Z"),
+                Instant.parse("2026-01-15T10:01:00Z"), 80, "com.sec.android.app.shealth")
+        )
+        val result = StepTrackingLogic.processHcRecords(
+            records, existing,
+            Instant.parse("2026-01-15T10:00:00Z"),
+            Instant.parse("2026-01-15T10:01:00Z"),
+            now = farFutureNow
+        )
+        // Samsung Health surplus should be distributed, android should not
+        assertFalse(result.filledBuckets.isEmpty())
+        assertEquals(80, result.filledBuckets.values.sum())
+        // Both origins should have audit data
+        assertEquals(0, result.perSourceDetail["android"]!!.stepsDistributed)
+        assertEquals(80, result.perSourceDetail["com.sec.android.app.shealth"]!!.stepsDistributed)
     }
 }
