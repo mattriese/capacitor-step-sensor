@@ -489,6 +489,7 @@ class StepSensorPlugin : Plugin() {
                 put("filledBucketCount", audit.filledBucketCount)
                 put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
                 put("changesTokenSource", audit.changesTokenSource)
+                put("cumulativeLostPhoneCredit", audit.cumulativeLostPhoneCredit)
             })
         }
 

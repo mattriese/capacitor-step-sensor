@@ -55,7 +55,15 @@ data class TickAuditData(
     val filledBucketCount: Int,
     val filledBucketTotalSteps: Int,
     /** "persisted" if changesToken was restored from SharedPreferences, "fresh" if a new token was fetched */
-    val changesTokenSource: String
+    val changesTokenSource: String,
+    /**
+     * Cumulative sum of phone steps that exceeded Samsung's HC delta across all
+     * HC-processing ticks (per non-skipped origin). Measures the Jensen's inequality
+     * effect: credit lost because max(0, delta - phone) clips negative surplus to 0.
+     * If this value ≈ the overcounting gap (app total - Samsung total), it confirms
+     * that per-tick clipping is the primary overcounting mechanism.
+     */
+    val cumulativeLostPhoneCredit: Long
 )
 
 class StepCounterService : Service(), SensorEventListener {
@@ -84,6 +92,15 @@ class StepCounterService : Service(), SensorEventListener {
         /** Count of ticks where any single bucket write exceeded MAX_STEPS_PER_BUCKET. */
         @Volatile
         var anomalousTickCount: Int = 0
+            private set
+
+        /**
+         * Cumulative phone steps that exceeded Samsung's HC delta across all
+         * HC-processing ticks. Measures the Jensen's inequality / per-tick clipping
+         * effect. Reset on service restart (in-memory only).
+         */
+        @Volatile
+        var cumulativeLostPhoneCredit: Long = 0L
             private set
 
         /**
@@ -523,7 +540,8 @@ class StepCounterService : Service(), SensorEventListener {
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
-                    changesTokenSource = changesTokenSource
+                    changesTokenSource = changesTokenSource,
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
                 ))
                 return@launch
             }
@@ -550,7 +568,8 @@ class StepCounterService : Service(), SensorEventListener {
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
-                    changesTokenSource = changesTokenSource
+                    changesTokenSource = changesTokenSource,
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
                 ))
                 return@launch
             }
@@ -572,7 +591,8 @@ class StepCounterService : Service(), SensorEventListener {
                     perOriginDetail = emptyMap(),
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
-                    changesTokenSource = changesTokenSource
+                    changesTokenSource = changesTokenSource,
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
                 ))
                 return@launch
             }
@@ -611,13 +631,27 @@ class StepCounterService : Service(), SensorEventListener {
                     continue
                 }
 
+                // Use queryFrom (floored to 30s boundary) instead of raw lastProcessTime.
+                // The DB query already uses queryFrom to capture the edge bucket;
+                // passing raw lastProcessTime here gives that bucket near-zero weight
+                // (e.g. 0.5s/30s overlap → ~1.7%) and undercounts phone steps,
+                // causing excess surplus distribution (the "proration bug").
                 val phoneTotalInRange = StepTrackingLogic.computeProratedPhoneSteps(
-                    existingBuckets, lastProcessTime, now
+                    existingBuckets, queryFrom, now
                 )
-                val watchSurplus = max(0L, delta - phoneTotalInRange.toLong())
+                val phoneInRangeLong = phoneTotalInRange.toLong()
+                val watchSurplus = max(0L, delta - phoneInRangeLong)
+
+                // Track Jensen's inequality effect: when phone > HC delta,
+                // the excess is clipped to 0 and lost. Accumulate across ticks.
+                val lostCredit = max(0L, phoneInRangeLong - delta)
+                if (lostCredit > 0) {
+                    cumulativeLostPhoneCredit += lostCredit
+                }
 
                 Log.d(TAG, "HC_DELTA | origin=$origin | delta=$delta" +
-                    " | phoneInRange=${phoneTotalInRange.toLong()} | watchSurplus=$watchSurplus")
+                    " | phoneInRange=$phoneInRangeLong | watchSurplus=$watchSurplus" +
+                    " | lostCredit=$lostCredit | cumulativeLostCredit=$cumulativeLostPhoneCredit")
 
                 var originBucketsFilled = 0
                 var originStepsDistributed = 0
@@ -677,7 +711,8 @@ class StepCounterService : Service(), SensorEventListener {
                 perOriginDetail = originDetails,
                 filledBucketCount = allFilledBuckets.size,
                 filledBucketTotalSteps = allFilledBuckets.values.sum(),
-                changesTokenSource = changesTokenSource
+                changesTokenSource = changesTokenSource,
+                cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
             ))
 
             hcDeltaTracker.markProcessed(now)

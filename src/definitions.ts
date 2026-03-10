@@ -159,6 +159,13 @@ export interface TickAuditHistoryEntry {
   filledBucketCount: number;
   filledBucketTotalSteps: number;
   changesTokenSource: 'persisted' | 'fresh';
+  /**
+   * Cumulative phone steps that exceeded Samsung's HC delta across all
+   * HC-processing ticks since service start. Measures Jensen's inequality
+   * effect (per-tick max(0,...) clipping). If this value ≈ (app total - Samsung total),
+   * it confirms per-tick clipping is the primary overcounting mechanism.
+   */
+  cumulativeLostPhoneCredit: number;
 }
 
 export interface TickAuditHistoryResult {
