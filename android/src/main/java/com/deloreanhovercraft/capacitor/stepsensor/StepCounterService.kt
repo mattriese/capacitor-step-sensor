@@ -104,6 +104,16 @@ class StepCounterService : Service(), SensorEventListener {
             private set
 
         /**
+         * Running cumulative balance per HC origin: cumulative(phoneStepsInRange) - cumulative(hcDelta).
+         * Positive = phone ahead (Samsung lagging, credit saved for later).
+         * Negative = HC ahead (watch-only steps to distribute as surplus).
+         * Eliminates Jensen's inequality overcounting by allowing phone credit
+         * from one tick to offset Samsung surplus from another.
+         * Reset on service restart (in-memory only).
+         */
+        val runningBalanceByOrigin: MutableMap<String, Long> = mutableMapOf()
+
+        /**
          * Store notification config before starting the service
          * (since extras may not be available when started from alarm receiver)
          */
@@ -632,25 +642,37 @@ class StepCounterService : Service(), SensorEventListener {
                 }
 
                 // Use queryFrom (floored to 30s boundary) instead of raw lastProcessTime.
-                // The DB query already uses queryFrom to capture the edge bucket;
-                // passing raw lastProcessTime here gives that bucket near-zero weight
-                // (e.g. 0.5s/30s overlap → ~1.7%) and undercounts phone steps,
-                // causing excess surplus distribution (the "proration bug").
                 val phoneTotalInRange = StepTrackingLogic.computeProratedPhoneSteps(
                     existingBuckets, queryFrom, now
                 )
                 val phoneInRangeLong = phoneTotalInRange.toLong()
-                val watchSurplus = max(0L, delta - phoneInRangeLong)
 
-                // Track Jensen's inequality effect: when phone > HC delta,
-                // the excess is clipped to 0 and lost. Accumulate across ticks.
+                // Running cumulative balance: phone credit from one tick offsets
+                // Samsung surplus from another, eliminating Jensen's inequality.
+                // balance > 0 = phone ahead (Samsung lagging, credit saved)
+                // balance < 0 = HC ahead (watch-only steps to distribute)
+                val prevBalance = runningBalanceByOrigin.getOrDefault(origin, 0L)
+                val newBalance = prevBalance + phoneInRangeLong - delta
+
+                val watchSurplus: Long
+                if (newBalance < 0) {
+                    // HC is cumulatively ahead — distribute the deficit
+                    watchSurplus = -newBalance
+                } else {
+                    watchSurplus = 0L
+                }
+
+                // Track Jensen's inequality effect for observability.
+                // This still measures credit that WOULD have been lost under the
+                // old per-tick max(0,...) approach, for comparison.
                 val lostCredit = max(0L, phoneInRangeLong - delta)
                 if (lostCredit > 0) {
                     cumulativeLostPhoneCredit += lostCredit
                 }
 
                 Log.d(TAG, "HC_DELTA | origin=$origin | delta=$delta" +
-                    " | phoneInRange=$phoneInRangeLong | watchSurplus=$watchSurplus" +
+                    " | phoneInRange=$phoneInRangeLong | prevBalance=$prevBalance" +
+                    " | newBalance=$newBalance | watchSurplus=$watchSurplus" +
                     " | lostCredit=$lostCredit | cumulativeLostCredit=$cumulativeLostPhoneCredit")
 
                 var originBucketsFilled = 0
@@ -666,6 +688,16 @@ class StepCounterService : Service(), SensorEventListener {
                     }
                     originBucketsFilled = filled.size
                     originStepsDistributed = filled.values.sum()
+                }
+
+                // Update balance: consume only what was actually distributed.
+                // If surplus couldn't be fully distributed (not enough zero buckets),
+                // the remaining deficit carries forward.
+                val actuallyDistributed = originStepsDistributed.toLong()
+                if (newBalance < 0) {
+                    runningBalanceByOrigin[origin] = newBalance + actuallyDistributed
+                } else {
+                    runningBalanceByOrigin[origin] = newBalance
                 }
 
                 originDetails[origin] = OriginTickDetail(
