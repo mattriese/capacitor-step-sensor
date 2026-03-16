@@ -30,6 +30,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
 data class OriginTickDetail(
@@ -37,7 +38,9 @@ data class OriginTickDetail(
     val phoneStepsInRange: Double,
     val watchSurplus: Long,
     val bucketsFilledByOrigin: Int,
-    val stepsDistributedByOrigin: Int
+    val stepsDistributedByOrigin: Int,
+    /** Running cumulative balance for this origin after this tick. Positive = phone ahead, negative = HC ahead. */
+    val runningBalanceAfter: Long = 0
 )
 
 data class TickAuditData(
@@ -111,7 +114,7 @@ class StepCounterService : Service(), SensorEventListener {
          * from one tick to offset Samsung surplus from another.
          * Reset on service restart (in-memory only).
          */
-        val runningBalanceByOrigin: MutableMap<String, Long> = mutableMapOf()
+        val runningBalanceByOrigin: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
 
         /**
          * Store notification config before starting the service
@@ -694,18 +697,20 @@ class StepCounterService : Service(), SensorEventListener {
                 // If surplus couldn't be fully distributed (not enough zero buckets),
                 // the remaining deficit carries forward.
                 val actuallyDistributed = originStepsDistributed.toLong()
-                if (newBalance < 0) {
-                    runningBalanceByOrigin[origin] = newBalance + actuallyDistributed
+                val balanceAfter = if (newBalance < 0) {
+                    newBalance + actuallyDistributed
                 } else {
-                    runningBalanceByOrigin[origin] = newBalance
+                    newBalance
                 }
+                runningBalanceByOrigin[origin] = balanceAfter
 
                 originDetails[origin] = OriginTickDetail(
                     delta = delta,
                     phoneStepsInRange = phoneTotalInRange,
                     watchSurplus = watchSurplus,
                     bucketsFilledByOrigin = originBucketsFilled,
-                    stepsDistributedByOrigin = originStepsDistributed
+                    stepsDistributedByOrigin = originStepsDistributed,
+                    runningBalanceAfter = balanceAfter
                 )
             }
 

@@ -429,6 +429,7 @@ class StepSensorPlugin : Plugin() {
                 put("watchSurplus", detail.watchSurplus)
                 put("bucketsFilledByOrigin", detail.bucketsFilledByOrigin)
                 put("stepsDistributedByOrigin", detail.stepsDistributedByOrigin)
+                put("runningBalanceAfter", detail.runningBalanceAfter)
             })
         }
 
