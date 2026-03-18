@@ -80,6 +80,7 @@ class StepCounterService : Service(), SensorEventListener {
         private const val KEY_NOTIFICATION_TITLE = "notification_title"
         private const val KEY_NOTIFICATION_TEXT = "notification_text"
         private const val KEY_HC_CHANGES_TOKEN = "hc_changes_token"
+        private const val KEY_RUNNING_BALANCE_PREFIX = "running_balance_"
 
         @Volatile
         var isRunning = false
@@ -112,9 +113,14 @@ class StepCounterService : Service(), SensorEventListener {
          * Negative = HC ahead (watch-only steps to distribute as surplus).
          * Eliminates Jensen's inequality overcounting by allowing phone credit
          * from one tick to offset Samsung surplus from another.
-         * Reset on service restart (in-memory only).
+         * Persisted to SharedPreferences so it survives service restarts.
          */
         val runningBalanceByOrigin: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
+
+        /** "persisted" if balance was restored from SharedPreferences, "fresh" if starting from zero. */
+        @Volatile
+        var runningBalanceSource: String = "fresh"
+            private set
 
         /**
          * Store notification config before starting the service
@@ -355,7 +361,12 @@ class StepCounterService : Service(), SensorEventListener {
                         initFreshChangesToken(client, prefs)
                     }
 
-                    Log.d(TAG, "Health Connect poller initialized | tokenSource=$changesTokenSource")
+                    // Restore running balances from SharedPreferences so phone credit
+                    // accumulated before the service restart is not lost.
+                    restoreRunningBalances(prefs)
+
+                    Log.d(TAG, "Health Connect poller initialized | tokenSource=$changesTokenSource" +
+                        " | balanceSource=$runningBalanceSource")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to initialize Health Connect poller", e)
                     healthConnectClient = null
@@ -408,6 +419,29 @@ class StepCounterService : Service(), SensorEventListener {
 
     private fun saveChangesToken(prefs: android.content.SharedPreferences, token: String) {
         prefs.edit().putString(KEY_HC_CHANGES_TOKEN, token).apply()
+    }
+
+    private fun saveRunningBalance(prefs: android.content.SharedPreferences, origin: String, balance: Long) {
+        prefs.edit().putLong("$KEY_RUNNING_BALANCE_PREFIX$origin", balance).apply()
+    }
+
+    private fun restoreRunningBalances(prefs: android.content.SharedPreferences) {
+        var restoredCount = 0
+        for ((key, value) in prefs.all) {
+            if (key.startsWith(KEY_RUNNING_BALANCE_PREFIX) && value is Long) {
+                val origin = key.removePrefix(KEY_RUNNING_BALANCE_PREFIX)
+                runningBalanceByOrigin[origin] = value
+                restoredCount++
+                Log.d(TAG, "Restored running balance | origin=$origin | balance=$value")
+            }
+        }
+        if (restoredCount > 0) {
+            runningBalanceSource = "persisted"
+            Log.d(TAG, "Running balances restored from SharedPreferences | count=$restoredCount")
+        } else {
+            runningBalanceSource = "fresh"
+            Log.d(TAG, "No persisted running balances found, starting from zero")
+        }
     }
 
     private suspend fun collectHcRecords(): List<HcStepRecord> {
@@ -703,6 +737,10 @@ class StepCounterService : Service(), SensorEventListener {
                     newBalance
                 }
                 runningBalanceByOrigin[origin] = balanceAfter
+                saveRunningBalance(
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+                    origin, balanceAfter
+                )
 
                 originDetails[origin] = OriginTickDetail(
                     delta = delta,
