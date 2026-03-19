@@ -20,6 +20,12 @@ echo "==> Stamping BUILD_ID = $BUILD_ID"
 # Replace the BUILD_ID value in PluginBuildInfo.kt
 sed -i '' "s/const val BUILD_ID = \".*\"/const val BUILD_ID = \"$BUILD_ID\"/" "$BUILD_INFO_FILE"
 
+# Compile Kotlin to catch errors before pushing
+echo "==> Compiling Kotlin..."
+cd "$PLUGIN_ROOT/android"
+./gradlew compileDebugKotlin --quiet
+cd "$PLUGIN_ROOT"
+
 # Build TypeScript
 echo "==> Building TypeScript..."
 npm run build
