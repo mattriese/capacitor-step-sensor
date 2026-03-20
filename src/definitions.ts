@@ -63,6 +63,8 @@ export interface BackfillResult {
   backedUp: boolean;
   /** Per-window audit data from the native plugin. Present when backedUp is true. */
   audit?: BackfillWindowAudit[];
+  /** Sum of stepsDistributed across all sources across all windows. */
+  totalSurplusDistributed?: number;
 }
 
 export interface ClearDataOptions {
@@ -126,6 +128,9 @@ export interface TickAuditResult {
       watchSurplus: number;
       bucketsFilledByOrigin: number;
       stepsDistributedByOrigin: number;
+      runningBalanceAfter: number;
+      /** Running balance BEFORE this tick's update. */
+      prevBalance: number;
     }
   >;
   filledBucketCount?: number;
@@ -136,6 +141,24 @@ export interface TickAuditResult {
    * service restarted without a valid stored token and took a 48h baseline snapshot.
    */
   changesTokenSource?: 'persisted' | 'fresh';
+  /** Raw hcDeltaTracker.lastProcessTime value at the time of HC processing (null if baseline tick or no HC data). */
+  lastProcessTime?: string | null;
+  /** The 30-second-floored value actually used for the DB query (null if no HC processing). */
+  queryFrom?: string | null;
+  /** Duration between lastProcessTime and now in seconds — how narrow the phone range is. */
+  rangeSeconds?: number | null;
+  /** Session-level cumulative phone delta total. */
+  sessionPhoneDeltaTotal?: number;
+  /** Session-level cumulative Samsung (non-android origin) delta total. */
+  sessionSamsungDeltaTotal?: number;
+  /** Session-level cumulative surplus steps distributed. */
+  sessionSurplusDistributed?: number;
+  /** Seconds since session start. */
+  sessionUptimeSeconds?: number | null;
+  /** Which origins had non-zero deltas and caused markProcessed to advance (null if no HC processing). */
+  lastProcessTimeAdvancedBy?: string | null;
+  /** Restored running balance values, only populated on first tick of session. */
+  balanceRestoredValues?: Record<string, number> | null;
 }
 
 export interface TickAuditHistoryEntry {
@@ -154,6 +177,9 @@ export interface TickAuditHistoryEntry {
       watchSurplus: number;
       bucketsFilledByOrigin: number;
       stepsDistributedByOrigin: number;
+      runningBalanceAfter: number;
+      /** Running balance BEFORE this tick's update. */
+      prevBalance: number;
     }
   >;
   filledBucketCount: number;
@@ -166,6 +192,24 @@ export interface TickAuditHistoryEntry {
    * it confirms per-tick clipping is the primary overcounting mechanism.
    */
   cumulativeLostPhoneCredit: number;
+  /** Raw hcDeltaTracker.lastProcessTime value at the time of HC processing (null if baseline tick or no HC data). */
+  lastProcessTime: string | null;
+  /** The 30-second-floored value actually used for the DB query (null if no HC processing). */
+  queryFrom: string | null;
+  /** Duration between lastProcessTime and now in seconds — how narrow the phone range is. */
+  rangeSeconds: number | null;
+  /** Session-level cumulative phone delta total. */
+  sessionPhoneDeltaTotal: number;
+  /** Session-level cumulative Samsung (non-android origin) delta total. */
+  sessionSamsungDeltaTotal: number;
+  /** Session-level cumulative surplus steps distributed. */
+  sessionSurplusDistributed: number;
+  /** Seconds since session start. */
+  sessionUptimeSeconds: number | null;
+  /** Which origins had non-zero deltas and caused markProcessed to advance (null if no HC processing). */
+  lastProcessTimeAdvancedBy: string | null;
+  /** Restored running balance values, only populated on first tick of session. */
+  balanceRestoredValues: Record<string, number> | null;
 }
 
 export interface TickAuditHistoryResult {
@@ -173,8 +217,10 @@ export interface TickAuditHistoryResult {
   ticks: TickAuditHistoryEntry[];
   /** Number of ticks where any bucket write exceeded 90 steps. */
   anomalousTickCount: number;
-  /** Current buffer size (max 20). */
+  /** Current buffer size (max 100). */
   bufferSize: number;
+  /** Seconds since session start (from service companion object). */
+  sessionUptimeSeconds?: number | null;
 }
 
 export interface PluginInfoResult {
@@ -269,7 +315,7 @@ export interface StepSensorPlugin {
   getLastTickAudit(): Promise<TickAuditResult>;
 
   /**
-   * Returns a ring buffer of recent tick audits (up to 20 ticks = ~10 minutes).
+   * Returns a ring buffer of recent tick audits (up to 100 ticks = ~50 minutes).
    * Includes anomalousTickCount for ticks where any bucket write exceeded 90 steps.
    * Use this for multi-tick analysis instead of getLastTickAudit which only
    * returns the single most recent tick.

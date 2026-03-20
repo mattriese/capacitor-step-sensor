@@ -40,7 +40,9 @@ data class OriginTickDetail(
     val bucketsFilledByOrigin: Int,
     val stepsDistributedByOrigin: Int,
     /** Running cumulative balance for this origin after this tick. Positive = phone ahead, negative = HC ahead. */
-    val runningBalanceAfter: Long = 0
+    val runningBalanceAfter: Long = 0,
+    /** Running balance BEFORE this tick's update. */
+    val prevBalance: Long = 0
 )
 
 data class TickAuditData(
@@ -66,7 +68,25 @@ data class TickAuditData(
      * If this value ≈ the overcounting gap (app total - Samsung total), it confirms
      * that per-tick clipping is the primary overcounting mechanism.
      */
-    val cumulativeLostPhoneCredit: Long
+    val cumulativeLostPhoneCredit: Long,
+    /** Raw hcDeltaTracker.lastProcessTime at the time of HC processing (null if baseline tick or no HC data). */
+    val lastProcessTime: String? = null,
+    /** The 30-second-floored value actually used for the DB query (null if no HC processing). */
+    val queryFrom: String? = null,
+    /** Duration.between(lastProcessTime, now).toMillis() / 1000.0 — how narrow the phone range is. */
+    val rangeSeconds: Double? = null,
+    /** Session-level cumulative phone delta total. */
+    val sessionPhoneDeltaTotal: Long = 0L,
+    /** Session-level cumulative Samsung (non-android origin) delta total. */
+    val sessionSamsungDeltaTotal: Long = 0L,
+    /** Session-level cumulative surplus steps distributed. */
+    val sessionSurplusDistributed: Long = 0L,
+    /** Seconds since session start. */
+    val sessionUptimeSeconds: Long? = null,
+    /** Which origins had non-zero deltas and caused markProcessed to advance (null if no HC processing). */
+    val lastProcessTimeAdvancedBy: String? = null,
+    /** Restored running balance values, only populated on first tick of session (tickCount == 1). */
+    val balanceRestoredValues: Map<String, Long>? = null
 )
 
 class StepCounterService : Service(), SensorEventListener {
@@ -91,7 +111,7 @@ class StepCounterService : Service(), SensorEventListener {
             private set
 
         /** Ring buffer of recent tick audits for debugging. Capacity = TICK_AUDIT_BUFFER_SIZE. */
-        private const val TICK_AUDIT_BUFFER_SIZE = 20
+        private const val TICK_AUDIT_BUFFER_SIZE = 100
         val tickAuditHistory: MutableList<TickAuditData> = mutableListOf()
         /** Count of ticks where any single bucket write exceeded MAX_STEPS_PER_BUCKET. */
         @Volatile
@@ -122,6 +142,16 @@ class StepCounterService : Service(), SensorEventListener {
         var runningBalanceSource: String = "fresh"
             private set
 
+        /** Last restored balance values from SharedPreferences, for inclusion in first tick audit. */
+        @Volatile
+        var lastRestoredBalances: Map<String, Long> = emptyMap()
+            private set
+
+        /** When the current session started (set in onStartCommand). */
+        @Volatile
+        var sessionStartTime: Instant? = null
+            private set
+
         /**
          * Store notification config before starting the service
          * (since extras may not be available when started from alarm receiver)
@@ -138,6 +168,11 @@ class StepCounterService : Service(), SensorEventListener {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val handler = Handler(Looper.getMainLooper())
+
+    // Session-level cumulative counters for diagnostics (instance vars — reset with service)
+    private var sessionPhoneDeltaTotal: Long = 0L
+    private var sessionSamsungDeltaTotal: Long = 0L
+    private var sessionSurplusDistributed: Long = 0L
 
     private lateinit var database: StepSensorDatabase
     private var sensorManager: SensorManager? = null
@@ -184,6 +219,7 @@ class StepCounterService : Service(), SensorEventListener {
         }
 
         isRunning = true
+        sessionStartTime = Instant.now()
 
         startPhoneSensor()
         startHealthConnectPoller()
@@ -442,6 +478,7 @@ class StepCounterService : Service(), SensorEventListener {
             runningBalanceSource = "fresh"
             Log.d(TAG, "No persisted running balances found, starting from zero")
         }
+        lastRestoredBalances = runningBalanceByOrigin.toMap()
     }
 
     private suspend fun collectHcRecords(): List<HcStepRecord> {
@@ -534,8 +571,13 @@ class StepCounterService : Service(), SensorEventListener {
         val capturedLatestSensor = latestSensorValue
         val capturedLastBaseline = lastSensorCount
 
+        // Session-level phone delta tracking (change 4)
+        sessionPhoneDeltaTotal += phoneDelta
+
         scope.launch {
             val now = Instant.now()
+            val sessionUptime = sessionStartTime?.let { Duration.between(it, now).seconds }
+            val balanceRestored = if (tickCount == 1L) lastRestoredBalances.ifEmpty { null } else null
 
             // Distribute phone delta across elapsed buckets instead of dumping
             // into a single bucket. Prevents >90 step buckets when tick timer
@@ -588,7 +630,12 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource,
-                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
+                    sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
+                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionSurplusDistributed = sessionSurplusDistributed,
+                    sessionUptimeSeconds = sessionUptime,
+                    balanceRestoredValues = balanceRestored
                 ))
                 return@launch
             }
@@ -616,7 +663,12 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource,
-                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
+                    sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
+                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionSurplusDistributed = sessionSurplusDistributed,
+                    sessionUptimeSeconds = sessionUptime,
+                    balanceRestoredValues = balanceRestored
                 ))
                 return@launch
             }
@@ -639,13 +691,20 @@ class StepCounterService : Service(), SensorEventListener {
                     filledBucketCount = 0,
                     filledBucketTotalSteps = 0,
                     changesTokenSource = changesTokenSource,
-                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
+                    cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
+                    lastProcessTime = hcDeltaTracker.lastProcessTime?.toString(),
+                    sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
+                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionSurplusDistributed = sessionSurplusDistributed,
+                    sessionUptimeSeconds = sessionUptime,
+                    balanceRestoredValues = balanceRestored
                 ))
                 return@launch
             }
 
             val lastProcessTime = hcDeltaTracker.lastProcessTime!!
-            Log.d(TAG, "HC_DELTA | deltas=$deltas | range=[$lastProcessTime, $now)")
+            val rangeSeconds = Duration.between(lastProcessTime, now).toMillis() / 1000.0
+            Log.d(TAG, "HC_DELTA | deltas=$deltas | range=[$lastProcessTime, $now) | rangeSeconds=$rangeSeconds")
 
             val hcRecordsJson = StepTrackingLogic.serializeHcRecords(hcRecords)
 
@@ -727,6 +786,10 @@ class StepCounterService : Service(), SensorEventListener {
                     originStepsDistributed = filled.values.sum()
                 }
 
+                // Session-level Samsung delta and surplus tracking (change 4)
+                sessionSamsungDeltaTotal += delta
+                sessionSurplusDistributed += originStepsDistributed
+
                 // Update balance: consume only what was actually distributed.
                 // If surplus couldn't be fully distributed (not enough zero buckets),
                 // the remaining deficit carries forward.
@@ -748,7 +811,8 @@ class StepCounterService : Service(), SensorEventListener {
                     watchSurplus = watchSurplus,
                     bucketsFilledByOrigin = originBucketsFilled,
                     stepsDistributedByOrigin = originStepsDistributed,
-                    runningBalanceAfter = balanceAfter
+                    runningBalanceAfter = balanceAfter,
+                    prevBalance = prevBalance
                 )
             }
 
@@ -772,6 +836,12 @@ class StepCounterService : Service(), SensorEventListener {
                     "filled=${allFilledBuckets.entries.filter { it.value > StepTrackingLogic.MAX_STEPS_PER_BUCKET }}")
             }
 
+            // Determine which origins caused markProcessed to advance (change 5)
+            val advancedBy = deltas.entries
+                .filter { it.value > 0 }
+                .map { it.key }
+                .joinToString(",")
+
             recordTickAudit(TickAuditData(
                 tickNumber = tickCount,
                 timestamp = now.toString(),
@@ -787,7 +857,16 @@ class StepCounterService : Service(), SensorEventListener {
                 filledBucketCount = allFilledBuckets.size,
                 filledBucketTotalSteps = allFilledBuckets.values.sum(),
                 changesTokenSource = changesTokenSource,
-                cumulativeLostPhoneCredit = cumulativeLostPhoneCredit
+                cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
+                lastProcessTime = lastProcessTime.toString(),
+                queryFrom = queryFrom.toString(),
+                rangeSeconds = rangeSeconds,
+                sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
+                sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                sessionSurplusDistributed = sessionSurplusDistributed,
+                sessionUptimeSeconds = sessionUptime,
+                lastProcessTimeAdvancedBy = advancedBy,
+                balanceRestoredValues = balanceRestored
             ))
 
             hcDeltaTracker.markProcessed(now)

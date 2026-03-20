@@ -325,9 +325,27 @@ class StepSensorPlugin : Plugin() {
                     })
                 }
 
+                // Compute totalSurplusDistributed across all windows and sources
+                var totalSurplusDistributed = 0
+                for (i in 0 until auditWindows.length()) {
+                    val windowObj = auditWindows.getJSONObject(i)
+                    if (windowObj.has("bySource")) {
+                        val bySource = windowObj.getJSONObject("bySource")
+                        val keys = bySource.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            val sourceObj = bySource.getJSONObject(key)
+                            if (sourceObj.has("stepsDistributed")) {
+                                totalSurplusDistributed += sourceObj.getInt("stepsDistributed")
+                            }
+                        }
+                    }
+                }
+
                 val result = JSObject().apply {
                     put("backedUp", true)
                     put("audit", auditWindows)
+                    put("totalSurplusDistributed", totalSurplusDistributed)
                 }
                 call.resolve(result)
             } catch (e: Exception) {
@@ -430,7 +448,16 @@ class StepSensorPlugin : Plugin() {
                 put("bucketsFilledByOrigin", detail.bucketsFilledByOrigin)
                 put("stepsDistributedByOrigin", detail.stepsDistributedByOrigin)
                 put("runningBalanceAfter", detail.runningBalanceAfter)
+                put("prevBalance", detail.prevBalance)
             })
+        }
+
+        val balanceRestoredObj = audit.balanceRestoredValues?.let { map ->
+            JSObject().also { obj ->
+                for ((origin, balance) in map) {
+                    obj.put(origin, balance)
+                }
+            }
         }
 
         val result = JSObject().apply {
@@ -449,6 +476,17 @@ class StepSensorPlugin : Plugin() {
             put("filledBucketCount", audit.filledBucketCount)
             put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
             put("changesTokenSource", audit.changesTokenSource)
+            put("lastProcessTime", audit.lastProcessTime)
+            put("queryFrom", audit.queryFrom)
+            put("rangeSeconds", audit.rangeSeconds)
+            put("sessionPhoneDeltaTotal", audit.sessionPhoneDeltaTotal)
+            put("sessionSamsungDeltaTotal", audit.sessionSamsungDeltaTotal)
+            put("sessionSurplusDistributed", audit.sessionSurplusDistributed)
+            put("sessionUptimeSeconds", audit.sessionUptimeSeconds)
+            put("lastProcessTimeAdvancedBy", audit.lastProcessTimeAdvancedBy)
+            if (balanceRestoredObj != null) {
+                put("balanceRestoredValues", balanceRestoredObj)
+            }
         }
         call.resolve(result)
     }
@@ -476,7 +514,16 @@ class StepSensorPlugin : Plugin() {
                     put("bucketsFilledByOrigin", detail.bucketsFilledByOrigin)
                     put("stepsDistributedByOrigin", detail.stepsDistributedByOrigin)
                     put("runningBalanceAfter", detail.runningBalanceAfter)
+                    put("prevBalance", detail.prevBalance)
                 })
+            }
+
+            val balanceRestoredObj = audit.balanceRestoredValues?.let { map ->
+                JSObject().also { obj ->
+                    for ((origin, balance) in map) {
+                        obj.put(origin, balance)
+                    }
+                }
             }
 
             ticksArray.put(JSObject().apply {
@@ -492,6 +539,17 @@ class StepSensorPlugin : Plugin() {
                 put("filledBucketTotalSteps", audit.filledBucketTotalSteps)
                 put("changesTokenSource", audit.changesTokenSource)
                 put("cumulativeLostPhoneCredit", audit.cumulativeLostPhoneCredit)
+                put("lastProcessTime", audit.lastProcessTime)
+                put("queryFrom", audit.queryFrom)
+                put("rangeSeconds", audit.rangeSeconds)
+                put("sessionPhoneDeltaTotal", audit.sessionPhoneDeltaTotal)
+                put("sessionSamsungDeltaTotal", audit.sessionSamsungDeltaTotal)
+                put("sessionSurplusDistributed", audit.sessionSurplusDistributed)
+                put("sessionUptimeSeconds", audit.sessionUptimeSeconds)
+                put("lastProcessTimeAdvancedBy", audit.lastProcessTimeAdvancedBy)
+                if (balanceRestoredObj != null) {
+                    put("balanceRestoredValues", balanceRestoredObj)
+                }
             })
         }
 
@@ -499,6 +557,9 @@ class StepSensorPlugin : Plugin() {
             put("ticks", ticksArray)
             put("anomalousTickCount", StepCounterService.anomalousTickCount)
             put("bufferSize", StepCounterService.tickAuditHistory.size)
+            put("sessionUptimeSeconds", StepCounterService.sessionStartTime?.let {
+                Duration.between(it, Instant.now()).seconds
+            })
         }
         call.resolve(result)
     }
