@@ -128,11 +128,16 @@ class StepCounterService : Service(), SensorEventListener {
             private set
 
         /**
-         * Running cumulative balance per HC origin: cumulative(phoneStepsInRange) - cumulative(hcDelta).
+         * Running cumulative balance per HC origin.
          * Positive = phone ahead (Samsung lagging, credit saved for later).
          * Negative = HC ahead (watch-only steps to distribute as surplus).
-         * Eliminates Jensen's inequality overcounting by allowing phone credit
-         * from one tick to offset Samsung surplus from another.
+         *
+         * Phone credit is accumulated via phoneDelta on EVERY tick (not just
+         * when Samsung reports). Samsung's delta is subtracted when Samsung
+         * reports. This ensures Samsung batch updates are compared against the
+         * full phone credit since the last Samsung update, regardless of how
+         * often the android origin advances the shared lastProcessTime.
+         *
          * Persisted to SharedPreferences so it survives service restarts.
          */
         val runningBalanceByOrigin: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
@@ -401,6 +406,12 @@ class StepCounterService : Service(), SensorEventListener {
                     // accumulated before the service restart is not lost.
                     restoreRunningBalances(prefs)
 
+                    // Ensure Samsung origin exists in balance map so phoneDelta
+                    // accumulates from the first tick, not just after Samsung first reports.
+                    if (!runningBalanceByOrigin.containsKey("com.sec.android.app.shealth")) {
+                        runningBalanceByOrigin["com.sec.android.app.shealth"] = 0L
+                    }
+
                     Log.d(TAG, "Health Connect poller initialized | tokenSource=$changesTokenSource" +
                         " | balanceSource=$runningBalanceSource")
                 } catch (e: Exception) {
@@ -597,6 +608,21 @@ class StepCounterService : Service(), SensorEventListener {
             }
             lastTickTime = now
 
+            // Accumulate phone credit into running balance on every tick.
+            // This ensures Samsung's batch deltas are compared against the full
+            // phone credit since the last Samsung tick, not just the narrow
+            // lastProcessTime-based DB query range (which is shortened by
+            // android-origin ticks advancing the shared lastProcessTime).
+            if (phoneDelta > 0) {
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                for ((origin, balance) in runningBalanceByOrigin) {
+                    if (origin == "android") continue
+                    val newBalance = balance + phoneDelta
+                    runningBalanceByOrigin[origin] = newBalance
+                    saveRunningBalance(prefs, origin, newBalance)
+                }
+            }
+
             val hcRecords = collectHcRecords()
 
             // Log every tick so we can verify the service is alive and see what's happening
@@ -748,7 +774,12 @@ class StepCounterService : Service(), SensorEventListener {
                 // balance > 0 = phone ahead (Samsung lagging, credit saved)
                 // balance < 0 = HC ahead (watch-only steps to distribute)
                 val prevBalance = runningBalanceByOrigin.getOrDefault(origin, 0L)
-                val newBalance = prevBalance + phoneInRangeLong - delta
+                // Phone credit is now accumulated via phoneDelta on every tick (step 2 above).
+                // Only subtract Samsung's delta here. The old approach used phoneInRange
+                // (prorated phone steps from the lastProcessTime DB range), but that window
+                // was narrowed by android-origin ticks advancing the shared lastProcessTime,
+                // causing phoneInRange to capture only ~29% of actual phone steps.
+                val newBalance = prevBalance - delta
 
                 val watchSurplus: Long
                 if (newBalance < 0) {
@@ -767,8 +798,9 @@ class StepCounterService : Service(), SensorEventListener {
                 }
 
                 Log.d(TAG, "HC_DELTA | origin=$origin | delta=$delta" +
-                    " | phoneInRange=$phoneInRangeLong | prevBalance=$prevBalance" +
-                    " | newBalance=$newBalance | watchSurplus=$watchSurplus" +
+                    " | phoneInRange=$phoneInRangeLong (audit only, not used for balance)" +
+                    " | prevBalance=$prevBalance | newBalance=$newBalance" +
+                    " | watchSurplus=$watchSurplus" +
                     " | lostCredit=$lostCredit | cumulativeLostCredit=$cumulativeLostPhoneCredit")
 
                 var originBucketsFilled = 0
