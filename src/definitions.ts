@@ -18,6 +18,38 @@ export interface StartStepTrackingOptions {
   notificationText?: string;
 }
 
+export interface StepSensorFitnessNotificationCommitment {
+  commitmentId: string;
+  taskName: string;
+  maxOrMin: 'max' | 'min';
+  intervalInMinutes: number;
+  completionMetric: number;
+  completionMetricType: 'seconds' | 'quantity';
+  timePeriodStartAt: string;
+  timePeriodEndAt: string;
+  reminderLeadMinutes: number;
+  staleAfterMinutes: number;
+}
+
+export interface ConfigureFitnessNotificationsOptions {
+  generatedAt: string;
+  commitments: StepSensorFitnessNotificationCommitment[];
+}
+
+export interface ScheduledFitnessReminder {
+  commitmentId: string;
+  title: string;
+  body: string;
+  scheduleAt: string;
+  dueAt: string;
+}
+
+export interface FitnessNotificationDebugState {
+  generatedAt: string | null;
+  commitments: StepSensorFitnessNotificationCommitment[];
+  scheduledReminders: ScheduledFitnessReminder[];
+}
+
 export interface GetTrackedStepsOptions {
   /** ISO 8601 timestamp. Only return buckets starting at or after this time. */
   since?: string;
@@ -149,8 +181,8 @@ export interface TickAuditResult {
   rangeSeconds?: number | null;
   /** Session-level cumulative phone delta total. */
   sessionPhoneDeltaTotal?: number;
-  /** Session-level cumulative Samsung (non-android origin) delta total. */
-  sessionSamsungDeltaTotal?: number;
+  /** Session-level cumulative non-"android" HC origin delta total (all external sources: Samsung Health, Fitbit, etc.). */
+  sessionExternalHcDeltaTotal?: number;
   /** Session-level cumulative surplus steps distributed. */
   sessionSurplusDistributed?: number;
   /** Seconds since session start. */
@@ -200,8 +232,8 @@ export interface TickAuditHistoryEntry {
   rangeSeconds: number | null;
   /** Session-level cumulative phone delta total. */
   sessionPhoneDeltaTotal: number;
-  /** Session-level cumulative Samsung (non-android origin) delta total. */
-  sessionSamsungDeltaTotal: number;
+  /** Session-level cumulative non-"android" HC origin delta total (all external sources: Samsung Health, Fitbit, etc.). */
+  sessionExternalHcDeltaTotal: number;
   /** Session-level cumulative surplus steps distributed. */
   sessionSurplusDistributed: number;
   /** Seconds since session start. */
@@ -328,6 +360,26 @@ export interface StepSensorPlugin {
    * Use this to verify the running plugin matches the expected source version.
    */
   getPluginInfo(): Promise<PluginInfoResult>;
+
+  /**
+   * Configure native local-notification ownership for fitness interval reminders.
+   * On Android, step interval reminders are recalculated from the plugin's local
+   * step evidence and scheduled/cancelled with exact alarms. On iOS/web, this is
+   * currently a no-op placeholder for API compatibility.
+   */
+  configureFitnessNotifications(options: ConfigureFitnessNotificationsOptions): Promise<void>;
+
+  /**
+   * Clear all native fitness reminder configuration and cancel any pending alarms
+   * or delivered notifications owned by this plugin.
+   */
+  clearFitnessNotifications(): Promise<void>;
+
+  /**
+   * Returns the currently persisted native fitness reminder config plus any
+   * scheduled reminder alarms. Intended for debugging.
+   */
+  getFitnessNotificationDebugState(): Promise<FitnessNotificationDebugState>;
 
   /**
    * Check the grant status of ACTIVITY_RECOGNITION and POST_NOTIFICATIONS

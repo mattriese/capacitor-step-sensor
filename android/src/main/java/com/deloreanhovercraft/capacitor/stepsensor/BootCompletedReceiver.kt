@@ -16,6 +16,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
             Log.d(TAG, "Device boot completed — re-registering step tracking alarms")
             val scheduler = StepTrackingScheduler(context)
             scheduler.reregisterFromPersisted()
+            FitnessNotificationManager(context).reregisterScheduledReminderAlarms()
         }
     }
 }

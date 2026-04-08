@@ -1,6 +1,15 @@
 import { WebPlugin } from '@capacitor/core';
 
-import type { BackfillResult, ExactAlarmPermissionResult, PluginInfoResult, StepSensorPermissionStatus, StepSensorPlugin, TickAuditHistoryResult, TickAuditResult } from './definitions';
+import type {
+  BackfillResult,
+  ExactAlarmPermissionResult,
+  FitnessNotificationDebugState,
+  PluginInfoResult,
+  StepSensorPermissionStatus,
+  StepSensorPlugin,
+  TickAuditHistoryResult,
+  TickAuditResult,
+} from './definitions';
 
 export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
   async scheduleStepTracking(): Promise<void> {
@@ -48,6 +57,22 @@ export class StepSensorWeb extends WebPlugin implements StepSensorPlugin {
 
   async getPluginInfo(): Promise<PluginInfoResult> {
     return { buildId: 'web' };
+  }
+
+  async configureFitnessNotifications(): Promise<void> {
+    // No-op on web
+  }
+
+  async clearFitnessNotifications(): Promise<void> {
+    // No-op on web
+  }
+
+  async getFitnessNotificationDebugState(): Promise<FitnessNotificationDebugState> {
+    return {
+      generatedAt: null,
+      commitments: [],
+      scheduledReminders: [],
+    };
   }
 
   async checkPermissions(): Promise<StepSensorPermissionStatus> {

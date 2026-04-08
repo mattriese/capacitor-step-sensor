@@ -49,10 +49,12 @@ class StepSensorPlugin : Plugin() {
 
     private lateinit var scheduler: StepTrackingScheduler
     private lateinit var database: StepSensorDatabase
+    private lateinit var fitnessNotificationManager: FitnessNotificationManager
 
     override fun load() {
         scheduler = StepTrackingScheduler(context)
         database = StepSensorDatabase.getInstance(context)
+        fitnessNotificationManager = FitnessNotificationManager(context)
     }
 
     @PluginMethod
@@ -480,7 +482,7 @@ class StepSensorPlugin : Plugin() {
             put("queryFrom", audit.queryFrom)
             put("rangeSeconds", audit.rangeSeconds)
             put("sessionPhoneDeltaTotal", audit.sessionPhoneDeltaTotal)
-            put("sessionSamsungDeltaTotal", audit.sessionSamsungDeltaTotal)
+            put("sessionExternalHcDeltaTotal", audit.sessionExternalHcDeltaTotal)
             put("sessionSurplusDistributed", audit.sessionSurplusDistributed)
             put("sessionUptimeSeconds", audit.sessionUptimeSeconds)
             put("lastProcessTimeAdvancedBy", audit.lastProcessTimeAdvancedBy)
@@ -543,7 +545,7 @@ class StepSensorPlugin : Plugin() {
                 put("queryFrom", audit.queryFrom)
                 put("rangeSeconds", audit.rangeSeconds)
                 put("sessionPhoneDeltaTotal", audit.sessionPhoneDeltaTotal)
-                put("sessionSamsungDeltaTotal", audit.sessionSamsungDeltaTotal)
+                put("sessionExternalHcDeltaTotal", audit.sessionExternalHcDeltaTotal)
                 put("sessionSurplusDistributed", audit.sessionSurplusDistributed)
                 put("sessionUptimeSeconds", audit.sessionUptimeSeconds)
                 put("lastProcessTimeAdvancedBy", audit.lastProcessTimeAdvancedBy)
@@ -570,6 +572,68 @@ class StepSensorPlugin : Plugin() {
             put("buildId", PluginBuildInfo.BUILD_ID)
         }
         call.resolve(result)
+    }
+
+    @PluginMethod
+    fun configureFitnessNotifications(call: PluginCall) {
+        val generatedAt = call.getString("generatedAt")
+        val commitmentsArray = call.getArray("commitments")
+        if (generatedAt == null || commitmentsArray == null) {
+            call.reject("Missing required parameters: generatedAt and commitments")
+            return
+        }
+
+        try {
+            val commitments = mutableListOf<StepIntervalNotificationConfig>()
+            for (i in 0 until commitmentsArray.length()) {
+                val obj = commitmentsArray.getJSONObject(i)
+                commitments.add(
+                    StepIntervalNotificationConfig(
+                        commitmentId = obj.getString("commitmentId"),
+                        taskName = obj.getString("taskName"),
+                        maxOrMin = obj.getString("maxOrMin"),
+                        intervalInMinutes = obj.getInt("intervalInMinutes"),
+                        completionMetric = obj.getInt("completionMetric"),
+                        completionMetricType = obj.getString("completionMetricType"),
+                        timePeriodStartAt = Instant.parse(obj.getString("timePeriodStartAt")),
+                        timePeriodEndAt = Instant.parse(obj.getString("timePeriodEndAt")),
+                        reminderLeadMinutes = obj.getInt("reminderLeadMinutes"),
+                        staleAfterMinutes = obj.getInt("staleAfterMinutes")
+                    )
+                )
+            }
+
+            fitnessNotificationManager.configureFitnessNotifications(
+                generatedAt = generatedAt,
+                commitments = commitments,
+                database = database
+            )
+            call.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to configure fitness notifications", e)
+            call.reject("Failed to configure fitness notifications: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun clearFitnessNotifications(call: PluginCall) {
+        try {
+            fitnessNotificationManager.clearFitnessNotifications()
+            call.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear fitness notifications", e)
+            call.reject("Failed to clear fitness notifications: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun getFitnessNotificationDebugState(call: PluginCall) {
+        try {
+            call.resolve(fitnessNotificationManager.getDebugState())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get fitness notification debug state", e)
+            call.reject("Failed to get fitness notification debug state: ${e.message}")
+        }
     }
 
     // --- Permission helpers ---

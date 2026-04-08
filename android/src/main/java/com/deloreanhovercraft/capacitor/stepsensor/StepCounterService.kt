@@ -77,8 +77,8 @@ data class TickAuditData(
     val rangeSeconds: Double? = null,
     /** Session-level cumulative phone delta total. */
     val sessionPhoneDeltaTotal: Long = 0L,
-    /** Session-level cumulative Samsung (non-android origin) delta total. */
-    val sessionSamsungDeltaTotal: Long = 0L,
+    /** Session-level cumulative non-"android" HC origin delta total (all external sources: Samsung Health, Fitbit, etc.). */
+    val sessionExternalHcDeltaTotal: Long = 0L,
     /** Session-level cumulative surplus steps distributed. */
     val sessionSurplusDistributed: Long = 0L,
     /** Seconds since session start. */
@@ -176,10 +176,11 @@ class StepCounterService : Service(), SensorEventListener {
 
     // Session-level cumulative counters for diagnostics (instance vars — reset with service)
     private var sessionPhoneDeltaTotal: Long = 0L
-    private var sessionSamsungDeltaTotal: Long = 0L
+    private var sessionExternalHcDeltaTotal: Long = 0L
     private var sessionSurplusDistributed: Long = 0L
 
     private lateinit var database: StepSensorDatabase
+    private lateinit var fitnessNotificationManager: FitnessNotificationManager
     private var sensorManager: SensorManager? = null
     private var stepSensor: Sensor? = null
     private var healthConnectClient: HealthConnectClient? = null
@@ -210,6 +211,7 @@ class StepCounterService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         database = StepSensorDatabase.getInstance(this)
+        fitnessNotificationManager = FitnessNotificationManager(this)
         Log.d(TAG, "Service created")
     }
 
@@ -229,6 +231,13 @@ class StepCounterService : Service(), SensorEventListener {
         startPhoneSensor()
         startHealthConnectPoller()
         startTimer()
+        scope.launch {
+            try {
+                fitnessNotificationManager.reconcileNotifications(Instant.now(), database)
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to reconcile fitness notifications on service start", error)
+            }
+        }
 
         Log.i(TAG, "Step tracking started | plugin build: ${PluginBuildInfo.BUILD_ID}")
         return START_STICKY
@@ -589,41 +598,42 @@ class StepCounterService : Service(), SensorEventListener {
             val now = Instant.now()
             val sessionUptime = sessionStartTime?.let { Duration.between(it, now).seconds }
             val balanceRestored = if (tickCount == 1L) lastRestoredBalances.ifEmpty { null } else null
+            try {
 
-            // Distribute phone delta across elapsed buckets instead of dumping
-            // into a single bucket. Prevents >90 step buckets when tick timer
-            // is delayed by Doze mode or system scheduling.
-            if (phoneDelta > 0) {
-                val distributed = StepTrackingLogic.distributePhoneDelta(
-                    phoneDelta, lastTickTime, now
-                )
-                for ((bucketStart, steps) in distributed) {
-                    val bucketEnd = bucketStart.plusSeconds(30)
-                    database.insertOrUpdate(bucketStart, bucketEnd, steps)
+                // Distribute phone delta across elapsed buckets instead of dumping
+                // into a single bucket. Prevents >90 step buckets when tick timer
+                // is delayed by Doze mode or system scheduling.
+                if (phoneDelta > 0) {
+                    val distributed = StepTrackingLogic.distributePhoneDelta(
+                        phoneDelta, lastTickTime, now
+                    )
+                    for ((bucketStart, steps) in distributed) {
+                        val bucketEnd = bucketStart.plusSeconds(30)
+                        database.insertOrUpdate(bucketStart, bucketEnd, steps)
+                    }
+                    if (distributed.values.any { it > StepTrackingLogic.MAX_STEPS_PER_BUCKET }) {
+                        anomalousTickCount++
+                        Log.w(TAG, "ANOMALY | phoneDelta=$phoneDelta exceeded cap in ${distributed.size} buckets")
+                    }
                 }
-                if (distributed.values.any { it > StepTrackingLogic.MAX_STEPS_PER_BUCKET }) {
-                    anomalousTickCount++
-                    Log.w(TAG, "ANOMALY | phoneDelta=$phoneDelta exceeded cap in ${distributed.size} buckets")
-                }
-            }
-            lastTickTime = now
+                lastTickTime = now
 
-            // Accumulate phone credit into running balance on every tick.
-            // This ensures Samsung's batch deltas are compared against the full
-            // phone credit since the last Samsung tick, not just the narrow
-            // lastProcessTime-based DB query range (which is shortened by
-            // android-origin ticks advancing the shared lastProcessTime).
-            if (phoneDelta > 0) {
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                for ((origin, balance) in runningBalanceByOrigin) {
-                    if (origin == "android") continue
-                    val newBalance = balance + phoneDelta
-                    runningBalanceByOrigin[origin] = newBalance
-                    saveRunningBalance(prefs, origin, newBalance)
+                // Accumulate phone credit into running balance on every tick.
+                // This ensures Samsung's batch deltas are compared against the full
+                // phone credit since the last Samsung tick, not just the narrow
+                // lastProcessTime-based DB query range (which is shortened by
+                // android-origin ticks advancing the shared lastProcessTime).
+                if (phoneDelta > 0) {
+                    val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    for ((origin, balance) in runningBalanceByOrigin) {
+                        if (origin == "android") continue
+                        val newBalance = balance + phoneDelta
+                        runningBalanceByOrigin[origin] = newBalance
+                        saveRunningBalance(prefs, origin, newBalance)
+                    }
                 }
-            }
 
-            val hcRecords = collectHcRecords()
+                val hcRecords = collectHcRecords()
 
             // Log every tick so we can verify the service is alive and see what's happening
             Log.d(TAG, "TICK #$tickCount | now=$now | phoneDelta=$phoneDelta" +
@@ -658,7 +668,7 @@ class StepCounterService : Service(), SensorEventListener {
                     changesTokenSource = changesTokenSource,
                     cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
                     sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
-                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionExternalHcDeltaTotal = sessionExternalHcDeltaTotal,
                     sessionSurplusDistributed = sessionSurplusDistributed,
                     sessionUptimeSeconds = sessionUptime,
                     balanceRestoredValues = balanceRestored
@@ -691,7 +701,7 @@ class StepCounterService : Service(), SensorEventListener {
                     changesTokenSource = changesTokenSource,
                     cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
                     sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
-                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionExternalHcDeltaTotal = sessionExternalHcDeltaTotal,
                     sessionSurplusDistributed = sessionSurplusDistributed,
                     sessionUptimeSeconds = sessionUptime,
                     balanceRestoredValues = balanceRestored
@@ -720,7 +730,7 @@ class StepCounterService : Service(), SensorEventListener {
                     cumulativeLostPhoneCredit = cumulativeLostPhoneCredit,
                     lastProcessTime = hcDeltaTracker.lastProcessTime?.toString(),
                     sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
-                    sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                    sessionExternalHcDeltaTotal = sessionExternalHcDeltaTotal,
                     sessionSurplusDistributed = sessionSurplusDistributed,
                     sessionUptimeSeconds = sessionUptime,
                     balanceRestoredValues = balanceRestored
@@ -818,8 +828,8 @@ class StepCounterService : Service(), SensorEventListener {
                     originStepsDistributed = filled.values.sum()
                 }
 
-                // Session-level Samsung delta and surplus tracking (change 4)
-                sessionSamsungDeltaTotal += delta
+                // Session-level external HC delta and surplus tracking
+                sessionExternalHcDeltaTotal += delta
                 sessionSurplusDistributed += originStepsDistributed
 
                 // Update balance: consume only what was actually distributed.
@@ -894,14 +904,21 @@ class StepCounterService : Service(), SensorEventListener {
                 queryFrom = queryFrom.toString(),
                 rangeSeconds = rangeSeconds,
                 sessionPhoneDeltaTotal = sessionPhoneDeltaTotal,
-                sessionSamsungDeltaTotal = sessionSamsungDeltaTotal,
+                sessionExternalHcDeltaTotal = sessionExternalHcDeltaTotal,
                 sessionSurplusDistributed = sessionSurplusDistributed,
                 sessionUptimeSeconds = sessionUptime,
                 lastProcessTimeAdvancedBy = advancedBy,
                 balanceRestoredValues = balanceRestored
             ))
 
-            hcDeltaTracker.markProcessed(now)
+                hcDeltaTracker.markProcessed(now)
+            } finally {
+                try {
+                    fitnessNotificationManager.reconcileNotifications(Instant.now(), database)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Failed to reconcile fitness notifications on tick", error)
+                }
+            }
         }
     }
 }
